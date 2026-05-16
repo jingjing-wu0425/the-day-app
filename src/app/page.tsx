@@ -85,15 +85,7 @@ export default function Home() {
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
 
   const fileRef = useRef<HTMLInputElement>(null);
-  const audioFileRef = useRef<HTMLInputElement>(null);
   const touchStart = useRef({ x: 0, y: 0 });
-  const isNative = useRef(false);
-
-  // Detect Capacitor native environment
-  useEffect(() => {
-    const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
-    isNative.current = !!cap?.isNativePlatform?.();
-  }, []);
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -372,26 +364,6 @@ export default function Home() {
         content: "",
         timestamp: now(),
         imageUrl: base64,
-      });
-      setRecords(updated);
-      saveAllRecords(updated);
-      if (viewDate !== today) setViewDate(today);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
-
-  const handleAudioFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      const updated = addFragmentToRecord(records, today, {
-        type: "voice",
-        content: "",
-        timestamp: now(),
-        audioUrl: base64,
       });
       setRecords(updated);
       saveAllRecords(updated);
@@ -710,15 +682,8 @@ export default function Home() {
                 </svg>
               </button>
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImage} />
-              <input ref={audioFileRef} type="file" accept="audio/*" capture="environment" className="hidden" onChange={handleAudioFile} />
               <button
-                onClick={() => {
-                  if (isNative.current) {
-                    audioFileRef.current?.click();
-                  } else {
-                    isRecording ? stopRecording() : startRecording();
-                  }
-                }}
+                onClick={() => { isRecording ? stopRecording() : startRecording(); }}
                 className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
                   isRecording ? "bg-red-500 text-white animate-pulse" : "text-muted/60 hover:text-fg/80"
                 }`}
