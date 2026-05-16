@@ -85,7 +85,15 @@ export default function Home() {
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const audioFileRef = useRef<HTMLInputElement>(null);
   const touchStart = useRef({ x: 0, y: 0 });
+  const isNative = useRef(false);
+
+  // Detect Capacitor native environment
+  useEffect(() => {
+    const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
+    isNative.current = !!cap?.isNativePlatform?.();
+  }, []);
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -243,13 +251,11 @@ export default function Home() {
   };
 
   const transcribeVoice = () => {
+    setShowVoiceOptions(false);
+    audioChunksRef.current = [];
     const SR = (window as unknown as Record<string, unknown>).SpeechRecognition
       || (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
-    if (!SR) {
-      // Fallback: just save as voice
-      saveAsVoice();
-      return;
-    }
+    if (!SR) return;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const recognition = new (SR as any)();
     recognition.lang = "zh-CN";
@@ -265,16 +271,19 @@ export default function Home() {
     };
     recognition.onend = () => {
       if (transcript.trim()) {
-        setText(transcript.trim());
+        const updated = addFragmentToRecord(records, today, {
+          type: "text",
+          content: transcript.trim(),
+          timestamp: now(),
+        });
+        setRecords(updated);
+        saveAllRecords(updated);
       }
-      setShowVoiceOptions(false);
-      audioChunksRef.current = [];
     };
-    recognition.onerror = () => {
-      // If transcription fails, fallback to voice
-      saveAsVoice();
-    };
+    recognition.onerror = () => {};
     recognition.start();
+    // Auto-stop after 30 seconds
+    setTimeout(() => recognition.stop(), 30000);
   };
 
   const isToday = viewDate === today;
@@ -363,6 +372,26 @@ export default function Home() {
         content: "",
         timestamp: now(),
         imageUrl: base64,
+      });
+      setRecords(updated);
+      saveAllRecords(updated);
+      if (viewDate !== today) setViewDate(today);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const handleAudioFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      const updated = addFragmentToRecord(records, today, {
+        type: "voice",
+        content: "",
+        timestamp: now(),
+        audioUrl: base64,
       });
       setRecords(updated);
       saveAllRecords(updated);
@@ -681,8 +710,15 @@ export default function Home() {
                 </svg>
               </button>
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImage} />
+              <input ref={audioFileRef} type="file" accept="audio/*" capture="environment" className="hidden" onChange={handleAudioFile} />
               <button
-                onClick={() => { isRecording ? stopRecording() : startRecording(); }}
+                onClick={() => {
+                  if (isNative.current) {
+                    audioFileRef.current?.click();
+                  } else {
+                    isRecording ? stopRecording() : startRecording();
+                  }
+                }}
                 className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
                   isRecording ? "bg-red-500 text-white animate-pulse" : "text-muted/60 hover:text-fg/80"
                 }`}
