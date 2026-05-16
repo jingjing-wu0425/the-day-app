@@ -226,7 +226,7 @@ export default function Home() {
                   {label && <span className="text-muted/25 ml-2">{label}</span>}
                 </p>
                 <h1 className="font-serif text-2xl font-semibold text-fg/80 tracking-wide">
-                  那一天
+                  {isToday ? "今天" : label}
                 </h1>
                 <div className="w-8 h-px bg-fg/20 mt-3" />
               </div>
