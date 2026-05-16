@@ -3,7 +3,7 @@ const path = require("path");
 
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="100" fill="#FFFFFF"/>
-  <text x="256" y="330" font-family="Georgia, serif" font-size="220" fill="#1A1A1A" text-anchor="middle" font-weight="bold">Day.</text>
+  <text x="256" y="310" font-family="Georgia, serif" font-size="160" fill="#1A1A1A" text-anchor="middle" font-weight="normal">Day.</text>
 </svg>`;
 
 const sizes = [

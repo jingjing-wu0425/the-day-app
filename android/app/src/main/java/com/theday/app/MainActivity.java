@@ -12,7 +12,7 @@ public class MainActivity extends BridgeActivity {
     private static final int RECORD_AUDIO_REQUEST = 1001;
 
     @Override
-    protected void onResume() {
+    public void onResume() {
         super.onResume();
         requestAudioPermissionIfNeeded();
     }

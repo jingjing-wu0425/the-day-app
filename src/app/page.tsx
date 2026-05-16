@@ -75,6 +75,7 @@ export default function Home() {
 
   const [isRecording, setIsRecording] = useState(false);
   const [showVoiceOptions, setShowVoiceOptions] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -242,40 +243,89 @@ export default function Home() {
     audioChunksRef.current = [];
   };
 
-  const transcribeVoice = () => {
+  const transcribeVoice = async () => {
     setShowVoiceOptions(false);
-    audioChunksRef.current = [];
-    const SR = (window as unknown as Record<string, unknown>).SpeechRecognition
-      || (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
-    if (!SR) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const recognition = new (SR as any)();
-    recognition.lang = "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    let transcript = "";
-    recognition.onresult = (e: { resultIndex: number; results: { transcript: string; isFinal: boolean }[][] }) => {
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i][0].isFinal) {
-          transcript += e.results[i][0].transcript;
-        }
+    setTranscribing(true);
+
+    try {
+      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      audioChunksRef.current = [];
+
+      if (audioBlob.size < 100) {
+        alert("录音数据为空，请重新录制");
+        return;
       }
-    };
-    recognition.onend = () => {
-      if (transcript.trim()) {
+
+      // Convert webm → wav via Web Audio API
+      const arrayBuf = await audioBlob.arrayBuffer();
+      const audioCtx = new AudioContext();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+      audioCtx.close();
+
+      const numCh = 1;
+      const sr = audioBuffer.sampleRate;
+      const samples = audioBuffer.getChannelData(0);
+      const dataLen = samples.length * 2;
+      const wavBuf = new ArrayBuffer(44 + dataLen);
+      const view = new DataView(wavBuf);
+      const writeStr = (off: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + dataLen, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numCh, true);
+      view.setUint32(24, sr, true);
+      view.setUint32(28, sr * numCh * 2, true);
+      view.setUint16(32, numCh * 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, "data");
+      view.setUint32(40, dataLen, true);
+      for (let i = 0; i < samples.length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+
+      const wavBlob = new Blob([wavBuf], { type: "audio/wav" });
+      const formData = new FormData();
+      formData.append("model", "glm-asr-2512");
+      formData.append("file", wavBlob, "recording.wav");
+
+      const apiKey = process.env.NEXT_PUBLIC_ZHIPU_API_KEY;
+      if (!apiKey) {
+        alert("API Key 未配置");
+        return;
+      }
+
+      const res = await fetch("https://open.bigmodel.cn/api/paas/v4/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        alert("转写失败: " + data.error.message);
+        return;
+      }
+      if (data.text?.trim()) {
         const updated = addFragmentToRecord(records, today, {
           type: "text",
-          content: transcript.trim(),
+          content: data.text.trim(),
           timestamp: now(),
         });
         setRecords(updated);
         saveAllRecords(updated);
+      } else {
+        alert("未能识别语音内容，请重新录制");
       }
-    };
-    recognition.onerror = () => {};
-    recognition.start();
-    // Auto-stop after 30 seconds
-    setTimeout(() => recognition.stop(), 30000);
+    } catch (err) {
+      console.error("ASR failed:", err);
+      alert("语音转文字失败: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setTranscribing(false);
+    }
   };
 
   const isToday = viewDate === today;
@@ -358,16 +408,30 @@ export default function Home() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const base64 = reader.result as string;
-      const updated = addFragmentToRecord(records, today, {
-        type: "photo",
-        content: "",
-        timestamp: now(),
-        imageUrl: base64,
-      });
-      setRecords(updated);
-      saveAllRecords(updated);
-      if (viewDate !== today) setViewDate(today);
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 1200;
+        let w = img.width, h = img.height;
+        if (w > MAX || h > MAX) {
+          if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+          else { w = Math.round(w * MAX / h); h = MAX; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+        const compressed = canvas.toDataURL("image/jpeg", 0.7);
+        const updated = addFragmentToRecord(records, today, {
+          type: "photo",
+          content: "",
+          timestamp: now(),
+          imageUrl: compressed,
+        });
+        setRecords(updated);
+        saveAllRecords(updated);
+        if (viewDate !== today) setViewDate(today);
+      };
+      img.src = reader.result as string;
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -714,7 +778,12 @@ export default function Home() {
             </div>
 
             {/* Voice options popover */}
-            {showVoiceOptions && (
+            {transcribing ? (
+              <div className="mt-3 flex items-center gap-2 justify-center animate-fade-up">
+                <div className="w-4 h-4 border-2 border-fg/30 border-t-fg/70 rounded-full animate-spin" />
+                <span className="text-[13px] text-fg/60 font-light">正在转写...</span>
+              </div>
+            ) : showVoiceOptions && (
               <div className="mt-3 flex items-center gap-3 justify-center animate-fade-up">
                 <button
                   onClick={saveAsVoice}
