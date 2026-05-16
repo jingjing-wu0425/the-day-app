@@ -170,8 +170,8 @@ export default function Home() {
   };
 
   const onTouchEnd = () => {
-    if (swipeX < -60) goDay(-1); // left swipe → previous day
-    else if (swipeX > 60 && !isToday) goDay(1); // right swipe → next day (towards today)
+    if (swipeX > 60) goDay(-1); // right swipe → previous day (yesterday)
+    else if (swipeX < -60 && !isToday) goDay(1); // left swipe → next day (towards today)
     setSwipeX(0);
   };
 
@@ -236,7 +236,7 @@ export default function Home() {
           {/* Swipe hints */}
           {!isToday && (
             <p className="text-[10px] text-muted/25 mb-6 font-light tracking-wide">
-              → 右滑回到今天
+              ← 左滑回到今天
             </p>
           )}
 
