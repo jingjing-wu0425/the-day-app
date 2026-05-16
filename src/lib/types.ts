@@ -1,6 +1,6 @@
 export interface Fragment {
   id: string;
-  type: "text" | "photo" | "voice";
+  type: "text" | "photo" | "voice" | "summary";
   content: string;
   timestamp: string; // HH:mm
   imageUrl?: string;

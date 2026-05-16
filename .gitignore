@@ -4,3 +4,4 @@ out/
 android/.gradle/
 android/build/
 android/app/build/
+.env.local

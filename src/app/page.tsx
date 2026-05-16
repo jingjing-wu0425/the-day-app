@@ -71,7 +71,7 @@ export default function Home() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [editOriginal, setEditOriginal] = useState("");
-  const [editType, setEditType] = useState<"text" | "photo" | "voice" | null>(null);
+  const [editType, setEditType] = useState<"text" | "photo" | "voice" | "summary" | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [showVoiceOptions, setShowVoiceOptions] = useState(false);
@@ -126,6 +126,77 @@ export default function Home() {
       || (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition;
     speechSupported.current = !!SR;
   }, []);
+
+  // AI summary generation
+  const generateSummary = useCallback(async (dateStr: string) => {
+    const record = getRecordForDate(records, dateStr);
+    if (record.fragments.length === 0) return;
+    const alreadyHas = record.fragments.some((f) => f.type === "summary");
+    if (alreadyHas) return;
+
+    const lines = record.fragments
+      .filter((f) => f.type !== "summary")
+      .map((f) => {
+        const time = f.timestamp;
+        if (f.type === "text") return `[${time}] ${f.content}`;
+        if (f.type === "voice") return `[${time}] (语音记录)`;
+        if (f.type === "photo") return `[${time}] (照片)`;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    if (!lines) return;
+
+    try {
+      const apiKey = process.env.NEXT_PUBLIC_ZHIPU_API_KEY;
+      if (!apiKey) return;
+      const res = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "glm-4-flash",
+          messages: [
+            {
+              role: "system",
+              content: "你是一个温暖、简洁的日记助手。根据用户今天的记录，生成一段简短的今日总结。语气要亲切自然，像朋友在耳边轻声回顾这一天。控制在80字以内，中文。直接输出总结内容，不要加标题或前缀。",
+            },
+            { role: "user", content: `这是我今天的记录：\n${lines}\n\n请帮我总结一下今天。` },
+          ],
+        }),
+      });
+      const data = await res.json();
+      const summary = data?.choices?.[0]?.message?.content?.trim();
+      if (!summary) return;
+      const updated = addFragmentToRecord(records, dateStr, {
+        type: "summary",
+        content: summary,
+        timestamp: "23:30",
+      });
+      setRecords(updated);
+      saveAllRecords(updated);
+    } catch {
+      // silently fail
+    }
+  }, [records]);
+
+  // Auto-summary at 23:30
+  useEffect(() => {
+    const check = () => {
+      const d = new Date();
+      if (d.getHours() === 23 && d.getMinutes() >= 30) {
+        generateSummary(today);
+      }
+    };
+    // Check every 60 seconds
+    const interval = setInterval(check, 60000);
+    // Also check immediately (for page loads after 23:30)
+    check();
+    return () => clearInterval(interval);
+  }, [today, generateSummary]);
 
   const startRecording = async () => {
     try {
@@ -237,7 +308,7 @@ export default function Home() {
 
   const saveEdit = () => {
     if (!editingId) return;
-    if (editType === "text") {
+    if (editType === "text" || editType === "summary") {
       const t = editText.trim();
       if (!t) return;
       const updated = updateFragmentInRecord(records, viewDate, editingId, { content: t });
@@ -410,14 +481,17 @@ export default function Home() {
 
                   {period.items.map((fragment, i) => (
                     <div key={fragment.id} className="relative pl-8 pb-6 last:pb-0 animate-fade-up" style={{ animationDelay: `${i * 50}ms` }}>
-                      <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : fragment.type === "voice" ? "bg-fg/70" : "bg-bg border-2 border-border"}`}>
+                      <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : fragment.type === "voice" ? "bg-fg/70" : fragment.type === "summary" ? "bg-fg/50" : "bg-bg border-2 border-border"}`}>
                         {(fragment.type === "photo") && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
                         {fragment.type === "voice" && (
                           <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="white" strokeWidth="2"/></svg>
                         )}
+                        {fragment.type === "summary" && (
+                          <svg width="7" height="7" viewBox="0 0 24 24" fill="white"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 mb-1">
-                        <p className="text-[11px] text-muted/60 font-light tracking-wide">{formatTime(fragment.timestamp)}</p>
+                        <p className="text-[11px] text-muted/60 font-light tracking-wide">{fragment.type === "summary" ? "今日总结" : formatTime(fragment.timestamp)}</p>
                         {editingId !== fragment.id && (
                           <button
                             onClick={() => startEdit(fragment)}
@@ -431,7 +505,7 @@ export default function Home() {
                       </div>
                       {editingId === fragment.id ? (
                         <div>
-                          {editType === "text" && (
+                          {(editType === "text" || editType === "summary") && (
                             <textarea
                               value={editText}
                               onChange={(e) => setEditText(e.target.value)}
@@ -468,7 +542,7 @@ export default function Home() {
                             <button onClick={undoEdit} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/70 hover:bg-fg/5 transition-all" title="撤回">
                               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
                             </button>
-                            {editType === "text" && (
+                            {(editType === "text" || editType === "summary") && (
                               <button onClick={saveEdit} className="w-8 h-8 rounded-full flex items-center justify-center bg-fg text-white hover:bg-fg/80 transition-all" title="保存">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
                               </button>
@@ -511,6 +585,11 @@ export default function Home() {
                                   ))}
                                 </div>
                               </div>
+                            </div>
+                          )}
+                          {fragment.type === "summary" && (
+                            <div className="bg-gradient-to-br from-fg/[0.04] to-fg/[0.02] rounded-xl px-4 py-3 card-float mt-1">
+                              <p className="text-[13px] text-fg/65 font-light leading-relaxed">{fragment.content}</p>
                             </div>
                           )}
                         </>
