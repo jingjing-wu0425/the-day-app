@@ -52,6 +52,43 @@ export function addFragmentToRecord(
   return [...records, { date, fragments: [newFragment] }];
 }
 
+export function updateFragmentInRecord(
+  records: DayRecord[],
+  date: string,
+  fragmentId: string,
+  updates: Partial<Pick<Fragment, "content" | "imageUrl">>
+): DayRecord[] {
+  const idx = records.findIndex((r) => r.date === date);
+  if (idx < 0) return records;
+  const updated = [...records];
+  updated[idx] = {
+    ...updated[idx],
+    fragments: updated[idx].fragments.map((f) =>
+      f.id === fragmentId ? { ...f, ...updates } : f
+    ),
+  };
+  return updated;
+}
+
+export function deleteFragmentFromRecord(
+  records: DayRecord[],
+  date: string,
+  fragmentId: string
+): DayRecord[] {
+  const idx = records.findIndex((r) => r.date === date);
+  if (idx < 0) return records;
+  const updated = [...records];
+  updated[idx] = {
+    ...updated[idx],
+    fragments: updated[idx].fragments.filter((f) => f.id !== fragmentId),
+  };
+  // Remove the day record if no fragments left
+  if (updated[idx].fragments.length === 0) {
+    return updated.filter((_, i) => i !== idx);
+  }
+  return updated;
+}
+
 export function formatDateCN(dateStr: string): string {
   const [y, m, d] = dateStr.split("-");
   const date = new Date(Number(y), Number(m) - 1, Number(d));

@@ -8,6 +8,8 @@ import {
   getTodayDate,
   getRecordForDate,
   addFragmentToRecord,
+  updateFragmentInRecord,
+  deleteFragmentFromRecord,
   formatDateCN,
   getDateLabel,
 } from "@/lib/store";
@@ -66,6 +68,9 @@ export default function Home() {
   const [text, setText] = useState("");
   const [swipeX, setSwipeX] = useState(0);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Calendar month defaults to current viewing date's month
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
@@ -129,6 +134,45 @@ export default function Home() {
     setShowCalendar(false);
   };
 
+  const startEdit = (fragment: Fragment) => {
+    if (fragment.type === "text") {
+      setEditingId(fragment.id);
+      setEditText(fragment.content);
+    }
+  };
+
+  const saveEdit = () => {
+    if (!editingId) return;
+    const t = editText.trim();
+    if (!t) return;
+    const updated = updateFragmentInRecord(records, viewDate, editingId, { content: t });
+    setRecords(updated);
+    saveAllRecords(updated);
+    setEditingId(null);
+    setEditText("");
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditText("");
+  };
+
+  const confirmDelete = (id: string) => {
+    setConfirmDeleteId(id);
+  };
+
+  const doDelete = () => {
+    if (!confirmDeleteId) return;
+    const updated = deleteFragmentFromRecord(records, viewDate, confirmDeleteId);
+    setRecords(updated);
+    saveAllRecords(updated);
+    setConfirmDeleteId(null);
+  };
+
+  const cancelDelete = () => {
+    setConfirmDeleteId(null);
+  };
+
   const handleSubmit = () => {
     const t = text.trim();
     if (!t) return;
@@ -147,17 +191,21 @@ export default function Home() {
   const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const url = URL.createObjectURL(file);
-    const updated = addFragmentToRecord(records, today, {
-      type: "photo",
-      content: "",
-      timestamp: now(),
-      imageUrl: url,
-    });
-    setRecords(updated);
-    saveAllRecords(updated);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      const updated = addFragmentToRecord(records, today, {
+        type: "photo",
+        content: "",
+        timestamp: now(),
+        imageUrl: base64,
+      });
+      setRecords(updated);
+      saveAllRecords(updated);
+      if (viewDate !== today) setViewDate(today);
+    };
+    reader.readAsDataURL(file);
     e.target.value = "";
-    if (viewDate !== today) setViewDate(today);
   };
 
   const onTouchStart = (e: React.TouchEvent) => {
@@ -272,9 +320,41 @@ export default function Home() {
                       <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : "bg-bg border-2 border-border"}`}>
                         {fragment.type === "photo" && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
                       </div>
-                      <p className="text-[11px] text-muted/60 font-light tracking-wide mb-1">{formatTime(fragment.timestamp)}</p>
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="text-[11px] text-muted/60 font-light tracking-wide">{formatTime(fragment.timestamp)}</p>
+                        {editingId !== fragment.id && confirmDeleteId !== fragment.id && (
+                          <button
+                            onClick={() => {
+                              if (fragment.type === "text") startEdit(fragment);
+                              confirmDelete(fragment.id);
+                            }}
+                            className="ml-auto text-muted/20 hover:text-fg/50 transition-colors p-1 -mr-1"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <circle cx="12" cy="12" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="18" cy="12" r="1" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
                       {fragment.type === "text" ? (
-                        <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
+                        editingId === fragment.id ? (
+                          <div>
+                            <input
+                              type="text"
+                              value={editText}
+                              onChange={(e) => setEditText(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
+                              autoFocus
+                              className="w-full bg-fg/5 rounded-lg px-3 py-2 text-[14px] text-fg/80 outline-none font-light"
+                            />
+                            <div className="flex gap-2 mt-2">
+                              <button onClick={saveEdit} className="text-[11px] text-fg/60 hover:text-fg/80 transition-colors px-2 py-1">保存</button>
+                              <button onClick={cancelEdit} className="text-[11px] text-muted/40 hover:text-fg/60 transition-colors px-2 py-1">取消</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
+                        )
                       ) : (
                         <div className="w-full aspect-[4/3] rounded-xl card-float overflow-hidden mt-1">
                           {fragment.imageUrl ? (
@@ -286,6 +366,12 @@ export default function Home() {
                               </svg>
                             </div>
                           )}
+                        </div>
+                      )}
+                      {confirmDeleteId === fragment.id && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <button onClick={doDelete} className="text-[11px] text-red-400/80 hover:text-red-500 transition-colors px-2 py-1">删除</button>
+                          <button onClick={cancelDelete} className="text-[11px] text-muted/40 hover:text-fg/60 transition-colors px-2 py-1">取消</button>
                         </div>
                       )}
                     </div>
