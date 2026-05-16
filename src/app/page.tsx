@@ -75,11 +75,8 @@ export default function Home() {
 
   const [isRecording, setIsRecording] = useState(false);
   const [showVoiceOptions, setShowVoiceOptions] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const speechSupported = useRef(false);
 
   // Calendar month defaults to current viewing date's month
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
@@ -120,13 +117,6 @@ export default function Home() {
   useEffect(() => {
     if (records.length > 0) saveAllRecords(records);
   }, [records]);
-
-  // Detect speech recognition support
-  useEffect(() => {
-    const SR = (window as unknown as { SpeechRecognition?: new () => unknown; webkitSpeechRecognition?: new () => unknown }).SpeechRecognition
-      || (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition;
-    speechSupported.current = !!SR;
-  }, []);
 
   // AI summary generation
   const generateSummary = useCallback(async (dateStr: string) => {
@@ -241,91 +231,6 @@ export default function Home() {
     reader.readAsDataURL(blob);
     setShowVoiceOptions(false);
     audioChunksRef.current = [];
-  };
-
-  const transcribeVoice = async () => {
-    setShowVoiceOptions(false);
-    setTranscribing(true);
-
-    try {
-      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-      audioChunksRef.current = [];
-
-      if (audioBlob.size < 100) {
-        alert("录音数据为空，请重新录制");
-        return;
-      }
-
-      // Convert webm → wav via Web Audio API
-      const arrayBuf = await audioBlob.arrayBuffer();
-      const audioCtx = new AudioContext();
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
-      audioCtx.close();
-
-      const numCh = 1;
-      const sr = audioBuffer.sampleRate;
-      const samples = audioBuffer.getChannelData(0);
-      const dataLen = samples.length * 2;
-      const wavBuf = new ArrayBuffer(44 + dataLen);
-      const view = new DataView(wavBuf);
-      const writeStr = (off: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-      writeStr(0, "RIFF");
-      view.setUint32(4, 36 + dataLen, true);
-      writeStr(8, "WAVE");
-      writeStr(12, "fmt ");
-      view.setUint32(16, 16, true);
-      view.setUint16(20, 1, true);
-      view.setUint16(22, numCh, true);
-      view.setUint32(24, sr, true);
-      view.setUint32(28, sr * numCh * 2, true);
-      view.setUint16(32, numCh * 2, true);
-      view.setUint16(34, 16, true);
-      writeStr(36, "data");
-      view.setUint32(40, dataLen, true);
-      for (let i = 0; i < samples.length; i++) {
-        const s = Math.max(-1, Math.min(1, samples[i]));
-        view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      }
-
-      const wavBlob = new Blob([wavBuf], { type: "audio/wav" });
-      const formData = new FormData();
-      formData.append("model", "glm-asr-2512");
-      formData.append("file", wavBlob, "recording.wav");
-
-      const apiKey = process.env.NEXT_PUBLIC_ZHIPU_API_KEY;
-      if (!apiKey) {
-        alert("API Key 未配置");
-        return;
-      }
-
-      const res = await fetch("https://open.bigmodel.cn/api/paas/v4/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (data.error) {
-        alert("转写失败: " + data.error.message);
-        return;
-      }
-      if (data.text?.trim()) {
-        const updated = addFragmentToRecord(records, today, {
-          type: "text",
-          content: data.text.trim(),
-          timestamp: now(),
-        });
-        setRecords(updated);
-        saveAllRecords(updated);
-      } else {
-        alert("未能识别语音内容，请重新录制");
-      }
-    } catch (err) {
-      console.error("ASR failed:", err);
-      alert("语音转文字失败: " + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setTranscribing(false);
-    }
   };
 
   const isToday = viewDate === today;
@@ -778,12 +683,7 @@ export default function Home() {
             </div>
 
             {/* Voice options popover */}
-            {transcribing ? (
-              <div className="mt-3 flex items-center gap-2 justify-center animate-fade-up">
-                <div className="w-4 h-4 border-2 border-fg/30 border-t-fg/70 rounded-full animate-spin" />
-                <span className="text-[13px] text-fg/60 font-light">正在转写...</span>
-              </div>
-            ) : showVoiceOptions && (
+            {showVoiceOptions && (
               <div className="mt-3 flex items-center gap-3 justify-center animate-fade-up">
                 <button
                   onClick={saveAsVoice}
@@ -794,15 +694,6 @@ export default function Home() {
                     <path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
                   </svg>
                   保存语音
-                </button>
-                <button
-                  onClick={transcribeVoice}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-fg/[0.06] text-[13px] text-fg/70 font-light hover:bg-fg/10 transition-all"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                  </svg>
-                  转为文字
                 </button>
                 <button
                   onClick={() => { setShowVoiceOptions(false); audioChunksRef.current = []; }}
