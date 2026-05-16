@@ -1,9 +1,10 @@
 export interface Fragment {
   id: string;
-  type: "text" | "photo";
+  type: "text" | "photo" | "voice";
   content: string;
   timestamp: string; // HH:mm
   imageUrl?: string;
+  audioUrl?: string;
 }
 
 export interface DaySummary {

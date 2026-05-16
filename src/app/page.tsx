@@ -70,7 +70,15 @@ export default function Home() {
   const [showCalendar, setShowCalendar] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [editOriginal, setEditOriginal] = useState("");
+  const [editType, setEditType] = useState<"text" | "photo" | "voice" | null>(null);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [showVoiceOptions, setShowVoiceOptions] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const speechSupported = useRef(false);
 
   // Calendar month defaults to current viewing date's month
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
@@ -112,6 +120,92 @@ export default function Home() {
     if (records.length > 0) saveAllRecords(records);
   }, [records]);
 
+  // Detect speech recognition support
+  useEffect(() => {
+    const SR = (window as unknown as { SpeechRecognition?: new () => unknown; webkitSpeechRecognition?: new () => unknown }).SpeechRecognition
+      || (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition;
+    speechSupported.current = !!SR;
+  }, []);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setShowVoiceOptions(true);
+      };
+      recorder.start();
+      setIsRecording(true);
+    } catch {
+      // mic denied
+    }
+  };
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    setIsRecording(false);
+  };
+
+  const saveAsVoice = () => {
+    const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      const updated = addFragmentToRecord(records, today, {
+        type: "voice",
+        content: "",
+        timestamp: now(),
+        audioUrl: base64,
+      });
+      setRecords(updated);
+      saveAllRecords(updated);
+    };
+    reader.readAsDataURL(blob);
+    setShowVoiceOptions(false);
+    audioChunksRef.current = [];
+  };
+
+  const transcribeVoice = () => {
+    const SR = (window as unknown as Record<string, unknown>).SpeechRecognition
+      || (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
+    if (!SR) {
+      // Fallback: just save as voice
+      saveAsVoice();
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const recognition = new (SR as any)();
+    recognition.lang = "zh-CN";
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    let transcript = "";
+    recognition.onresult = (e: { resultIndex: number; results: { transcript: string; isFinal: boolean }[][] }) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i][0].isFinal) {
+          transcript += e.results[i][0].transcript;
+        }
+      }
+    };
+    recognition.onend = () => {
+      if (transcript.trim()) {
+        setText(transcript.trim());
+      }
+      setShowVoiceOptions(false);
+      audioChunksRef.current = [];
+    };
+    recognition.onerror = () => {
+      // If transcription fails, fallback to voice
+      saveAsVoice();
+    };
+    recognition.start();
+  };
+
   const isToday = viewDate === today;
   const currentRecord = getRecordForDate(records, viewDate);
   const periods = groupByPeriod(currentRecord.fragments);
@@ -135,42 +229,41 @@ export default function Home() {
   };
 
   const startEdit = (fragment: Fragment) => {
-    if (fragment.type === "text") {
-      setEditingId(fragment.id);
-      setEditText(fragment.content);
-    }
+    setEditingId(fragment.id);
+    setEditText(fragment.content);
+    setEditOriginal(fragment.content);
+    setEditType(fragment.type);
   };
 
   const saveEdit = () => {
     if (!editingId) return;
-    const t = editText.trim();
-    if (!t) return;
-    const updated = updateFragmentInRecord(records, viewDate, editingId, { content: t });
-    setRecords(updated);
-    saveAllRecords(updated);
-    setEditingId(null);
-    setEditText("");
+    if (editType === "text") {
+      const t = editText.trim();
+      if (!t) return;
+      const updated = updateFragmentInRecord(records, viewDate, editingId, { content: t });
+      setRecords(updated);
+      saveAllRecords(updated);
+    }
+    closeEdit();
   };
 
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditText("");
-  };
-
-  const confirmDelete = (id: string) => {
-    setConfirmDeleteId(id);
+  const undoEdit = () => {
+    closeEdit();
   };
 
   const doDelete = () => {
-    if (!confirmDeleteId) return;
-    const updated = deleteFragmentFromRecord(records, viewDate, confirmDeleteId);
+    if (!editingId) return;
+    const updated = deleteFragmentFromRecord(records, viewDate, editingId);
     setRecords(updated);
     saveAllRecords(updated);
-    setConfirmDeleteId(null);
+    closeEdit();
   };
 
-  const cancelDelete = () => {
-    setConfirmDeleteId(null);
+  const closeEdit = () => {
+    setEditingId(null);
+    setEditText("");
+    setEditOriginal("");
+    setEditType(null);
   };
 
   const handleSubmit = () => {
@@ -317,17 +410,17 @@ export default function Home() {
 
                   {period.items.map((fragment, i) => (
                     <div key={fragment.id} className="relative pl-8 pb-6 last:pb-0 animate-fade-up" style={{ animationDelay: `${i * 50}ms` }}>
-                      <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : "bg-bg border-2 border-border"}`}>
-                        {fragment.type === "photo" && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
+                      <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : fragment.type === "voice" ? "bg-fg/70" : "bg-bg border-2 border-border"}`}>
+                        {(fragment.type === "photo") && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
+                        {fragment.type === "voice" && (
+                          <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="white" strokeWidth="2"/></svg>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 mb-1">
                         <p className="text-[11px] text-muted/60 font-light tracking-wide">{formatTime(fragment.timestamp)}</p>
-                        {editingId !== fragment.id && confirmDeleteId !== fragment.id && (
+                        {editingId !== fragment.id && (
                           <button
-                            onClick={() => {
-                              if (fragment.type === "text") startEdit(fragment);
-                              confirmDelete(fragment.id);
-                            }}
+                            onClick={() => startEdit(fragment)}
                             className="ml-auto text-muted/20 hover:text-fg/50 transition-colors p-1 -mr-1"
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -336,43 +429,91 @@ export default function Home() {
                           </button>
                         )}
                       </div>
-                      {fragment.type === "text" ? (
-                        editingId === fragment.id ? (
-                          <div>
-                            <input
-                              type="text"
+                      {editingId === fragment.id ? (
+                        <div>
+                          {editType === "text" && (
+                            <textarea
                               value={editText}
                               onChange={(e) => setEditText(e.target.value)}
-                              onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
+                              onKeyDown={(e) => { if (e.key === "Escape") undoEdit(); }}
                               autoFocus
-                              className="w-full bg-fg/5 rounded-lg px-3 py-2 text-[14px] text-fg/80 outline-none font-light"
+                              rows={3}
+                              className="w-full bg-fg/5 rounded-lg px-3 py-2 text-[14px] text-fg/80 outline-none font-light resize-none leading-relaxed"
                             />
-                            <div className="flex gap-2 mt-2">
-                              <button onClick={saveEdit} className="text-[11px] text-fg/60 hover:text-fg/80 transition-colors px-2 py-1">保存</button>
-                              <button onClick={cancelEdit} className="text-[11px] text-muted/40 hover:text-fg/60 transition-colors px-2 py-1">取消</button>
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
-                        )
-                      ) : (
-                        <div className="w-full aspect-[4/3] rounded-xl card-float overflow-hidden mt-1">
-                          {fragment.imageUrl ? (
-                            <img src={fragment.imageUrl} alt="记录的照片" className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center text-muted/30">
-                              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                                <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
-                              </svg>
+                          )}
+                          {editType === "photo" && fragment.imageUrl && (
+                            <div className="w-full aspect-[4/3] rounded-xl overflow-hidden mt-1 opacity-70">
+                              <img src={fragment.imageUrl} alt="编辑中" className="w-full h-full object-cover" />
                             </div>
                           )}
+                          {editType === "voice" && (
+                            <div className="bg-fg/5 rounded-lg px-3 py-3 flex items-center gap-2">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg/40 shrink-0">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="currentColor" strokeWidth="2"/>
+                                <line x1="12" y1="19" x2="12" y2="23"/>
+                                <line x1="8" y1="23" x2="16" y2="23"/>
+                              </svg>
+                              <div className="flex-1 flex items-center gap-[2px]">
+                                {[...Array(20)].map((_, j) => (
+                                  <div key={j} className="w-[2px] rounded-full bg-fg/20" style={{ height: `${Math.random() * 12 + 4}px` }} />
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-4 mt-3 justify-end">
+                            <button onClick={doDelete} className="w-8 h-8 rounded-full flex items-center justify-center text-red-300/80 hover:text-red-400 hover:bg-red-50 transition-all" title="删除">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                            </button>
+                            <button onClick={undoEdit} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/70 hover:bg-fg/5 transition-all" title="撤回">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                            </button>
+                            {editType === "text" && (
+                              <button onClick={saveEdit} className="w-8 h-8 rounded-full flex items-center justify-center bg-fg text-white hover:bg-fg/80 transition-all" title="保存">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      )}
-                      {confirmDeleteId === fragment.id && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <button onClick={doDelete} className="text-[11px] text-red-400/80 hover:text-red-500 transition-colors px-2 py-1">删除</button>
-                          <button onClick={cancelDelete} className="text-[11px] text-muted/40 hover:text-fg/60 transition-colors px-2 py-1">取消</button>
-                        </div>
+                      ) : (
+                        <>
+                          {fragment.type === "text" && (
+                            <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
+                          )}
+                          {fragment.type === "photo" && (
+                            <div className="w-full aspect-[4/3] rounded-xl card-float overflow-hidden mt-1">
+                              {fragment.imageUrl ? (
+                                <img src={fragment.imageUrl} alt="记录的照片" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center text-muted/30">
+                                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                                  </svg>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {fragment.type === "voice" && (
+                            <div className="bg-fg/[0.03] rounded-xl px-3 py-3 card-float mt-1">
+                              <div className="flex items-center gap-3">
+                                <button
+                                  onClick={() => {
+                                    const audio = new Audio(fragment.audioUrl);
+                                    audio.play();
+                                  }}
+                                  className="w-8 h-8 rounded-full bg-fg/10 flex items-center justify-center text-fg/60 hover:bg-fg/20 transition-all shrink-0"
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                                </button>
+                                <div className="flex-1 flex items-center gap-[2px]">
+                                  {[...Array(24)].map((_, j) => (
+                                    <div key={j} className="w-[2px] rounded-full bg-fg/15" style={{ height: `${Math.random() * 12 + 4}px` }} />
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   ))}
@@ -461,6 +602,19 @@ export default function Home() {
                 </svg>
               </button>
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImage} />
+              <button
+                onClick={() => { isRecording ? stopRecording() : startRecording(); }}
+                className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
+                  isRecording ? "bg-red-500 text-white animate-pulse" : "text-muted/60 hover:text-fg/80"
+                }`}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" fill={isRecording ? "currentColor" : "none"} />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              </button>
               <input
                 type="text"
                 value={text}
@@ -478,6 +632,37 @@ export default function Home() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </button>
             </div>
+
+            {/* Voice options popover */}
+            {showVoiceOptions && (
+              <div className="mt-3 flex items-center gap-3 justify-center animate-fade-up">
+                <button
+                  onClick={saveAsVoice}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-fg/[0.06] text-[13px] text-fg/70 font-light hover:bg-fg/10 transition-all"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
+                  </svg>
+                  保存语音
+                </button>
+                <button
+                  onClick={transcribeVoice}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-fg/[0.06] text-[13px] text-fg/70 font-light hover:bg-fg/10 transition-all"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  转为文字
+                </button>
+                <button
+                  onClick={() => { setShowVoiceOptions(false); audioChunksRef.current = []; }}
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/60 transition-colors"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="max-w-lg mx-auto px-5 py-4 pb-[max(16px,env(safe-area-inset-bottom))]">
