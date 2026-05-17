@@ -18,11 +18,13 @@ export default function LoginPage() {
     if (password.length < 6) { setError("密码至少6位"); return; }
     setSubmitting(true);
     try {
-      await (Bmob.User.login as any)(phone, password);
+      const result = await (Bmob.User.login as any)(phone, password);
+      console.log("login result:", result);
       router.push("/");
     } catch (err: unknown) {
-      const e = err as { code?: number; error?: string };
-      setError(e.error || "登录失败");
+      console.error("login error:", err);
+      const e = err as { code?: number; error?: string; message?: string };
+      setError(e.error || e.message || JSON.stringify(err));
     } finally {
       setSubmitting(false);
     }
