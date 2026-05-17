@@ -6,11 +6,11 @@ import { Fragment } from "@/lib/types";
 import { useAuth } from "@/lib/auth-context";
 import {
   getTodayDate,
-  supaGetRecordDates,
-  supaGetDayRecord,
-  supaAddFragment,
-  supaUpdateFragment,
-  supaDeleteFragment,
+  lcGetRecordDates,
+  lcGetDayRecord,
+  lcAddFragment,
+  lcUpdateFragment,
+  lcDeleteFragment,
   migrateFromLocalStorage,
   formatDateCN,
   getDateLabel,
@@ -105,10 +105,10 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     (async () => {
-      await migrateFromLocalStorage(user.id);
-      const dates = await supaGetRecordDates(user.id);
+      await migrateFromLocalStorage(user.objectId);
+      const dates = await lcGetRecordDates(user.objectId);
       setRecordedDates(new Set(dates));
-      const record = await supaGetDayRecord(user.id, viewDate);
+      const record = await lcGetDayRecord(user.objectId, viewDate);
       setFragments(record.fragments);
       setLoading(false);
     })();
@@ -165,7 +165,7 @@ export default function Home() {
       const data = await res.json();
       const summary = data?.choices?.[0]?.message?.content?.trim();
       if (!summary || !user) return;
-      const newFrag = await supaAddFragment(user.id, dateStr, {
+      const newFrag = await lcAddFragment(user.objectId, dateStr, {
         type: "summary", content: summary, timestamp: "23:30",
       });
       setFragments((prev) => [...prev, newFrag]);
@@ -216,7 +216,7 @@ export default function Home() {
     const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
     audioChunksRef.current = [];
     setShowVoiceOptions(false);
-    const newFrag = await supaAddFragment(user.id, today, {
+    const newFrag = await lcAddFragment(user.objectId, today, {
       type: "voice", content: "", timestamp: now(), audioUrl: "",
     }, blob);
     setFragments((prev) => [...prev, newFrag]);
@@ -249,7 +249,7 @@ export default function Home() {
     if (editType === "text" || editType === "summary") {
       const t = editText.trim();
       if (!t) return;
-      await supaUpdateFragment(user.id, editingId, { content: t });
+      await lcUpdateFragment(user.objectId, editingId, { content: t });
       setFragments((prev) => prev.map((f) => f.id === editingId ? { ...f, content: t } : f));
     }
     closeEdit();
@@ -259,7 +259,7 @@ export default function Home() {
 
   const doDelete = async () => {
     if (!editingId || !user) return;
-    await supaDeleteFragment(user.id, editingId);
+    await lcDeleteFragment(user.objectId, editingId);
     setFragments((prev) => prev.filter((f) => f.id !== editingId));
     closeEdit();
   };
@@ -274,7 +274,7 @@ export default function Home() {
   const handleSubmit = async () => {
     const t = text.trim();
     if (!t || !user) return;
-    const newFrag = await supaAddFragment(user.id, today, {
+    const newFrag = await lcAddFragment(user.objectId, today, {
       type: "text", content: t, timestamp: now(),
     });
     setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
@@ -302,7 +302,7 @@ export default function Home() {
         canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
         canvas.toBlob(async (blob) => {
           if (!blob) return;
-          const newFrag = await supaAddFragment(user.id, today, {
+          const newFrag = await lcAddFragment(user.objectId, today, {
             type: "photo", content: "", timestamp: now(), imageUrl: "",
           }, blob);
           setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);

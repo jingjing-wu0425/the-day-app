@@ -1,61 +1,54 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { User } from "@supabase/supabase-js";
-import { getSupabase } from "./supabase";
-import { Profile } from "./types";
+import Bmob, { initBmob } from "./bmob";
+
+interface BmobUser {
+  objectId: string;
+  username: string;
+  nickname?: string;
+  sessionToken?: string;
+}
 
 interface AuthState {
-  user: User | null;
-  profile: Profile | null;
+  user: BmobUser | null;
   loading: boolean;
-  signOut: () => Promise<void>;
+  signOut: () => void;
 }
 
 const AuthContext = createContext<AuthState>({
   user: null,
-  profile: null,
   loading: true,
-  signOut: async () => {},
+  signOut: () => {},
 });
 
 export const useAuth = () => useContext(AuthContext);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [user, setUser] = useState<BmobUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadProfile = useCallback(async (uid: string) => {
-    const { data } = await getSupabase().from("profiles").select("*").eq("id", uid).single();
-    setProfile(data);
+  useEffect(() => {
+    initBmob();
+    const current = Bmob.User.current();
+    if (current) {
+      setUser(current as unknown as BmobUser);
+    }
+    setLoading(false);
   }, []);
 
-  useEffect(() => {
-    getSupabase().auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (session?.user) loadProfile(session.user.id);
-      setLoading(false);
-    });
-
-    const { data: { subscription } } = getSupabase().auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) loadProfile(session.user.id);
-      else setProfile(null);
-      setLoading(false);
-    });
-
-    return () => subscription.unsubscribe();
-  }, [loadProfile]);
-
-  const signOut = useCallback(async () => {
-    await getSupabase().auth.signOut();
+  const signOut = useCallback(() => {
+    // Bmob.User.logout() clears ALL localStorage, which would break migration flags.
+    // Instead, just clear the Bmob session key.
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("bmob_session_token");
+    }
+    Bmob.User.logout();
     setUser(null);
-    setProfile(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signOut }}>
       {children}
     </AuthContext.Provider>
   );

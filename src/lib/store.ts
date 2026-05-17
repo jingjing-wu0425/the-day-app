@@ -1,8 +1,13 @@
-import { Fragment, Profile, Friendship } from "./types";
-import { getSupabase } from "./supabase";
+import Bmob from "./bmob";
+import { Fragment } from "./types";
+
+// hydrogen-js-sdk has recursive type issues with BmobPromise.
+// Cast all async query results to `any` to break the cycle.
+const Q = (table: string) => Bmob.Query(table) as any;
+const F = (name: string, file: File) => Bmob.File(name, file) as any;
 
 export interface DayRecord {
-  date: string; // YYYY-MM-DD
+  date: string;
   fragments: Fragment[];
 }
 
@@ -32,101 +37,92 @@ export function getDateLabel(dateStr: string): string {
 }
 
 export function getRecordForDate(records: DayRecord[], date: string): DayRecord {
-  const found = records.find((r) => r.date === date);
-  return found || { date, fragments: [] };
+  return records.find((r) => r.date === date) || { date, fragments: [] };
 }
 
-// ─── Supabase: day records ──────────────────
+// ─── Bmob: ensure DayRecord exists ──────────
 
-export async function supaGetRecordDates(userId: string): Promise<string[]> {
-  const { data } = await getSupabase().from("day_records").select("date").eq("user_id", userId);
-  if (!data) return [];
-  return data.map((r: { date: string }) => r.date);
+async function ensureDayRecord(userId: string, date: string): Promise<string> {
+  const q = Q("DayRecord");
+  q.equalTo("date", "==", date);
+  q.equalTo("owner", "==", Bmob.Pointer("_User").set(userId));
+  const results = await q.find();
+  if (results.length > 0) return results[0].objectId;
+
+  const record = Q("DayRecord");
+  record.set("date", date);
+  record.set("owner", Bmob.Pointer("_User").set(userId));
+  const acl = { "*": { read: true }, [userId]: { read: true, write: true } };
+  record.set("ACL", acl);
+  const saved = await record.save();
+  return saved.objectId as string;
 }
 
-export async function supaGetDayRecord(userId: string, date: string): Promise<DayRecord> {
-  const { data: record } = await getSupabase()
-    .from("day_records")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("date", date)
-    .single();
+// ─── Bmob: data operations ──────────────────
 
-  if (!record) return { date, fragments: [] };
+export async function lcGetRecordDates(userId: string): Promise<string[]> {
+  const q = Q("DayRecord");
+  q.equalTo("owner", "==", Bmob.Pointer("_User").set(userId));
+  q.limit(1000);
+  q.order("-date");
+  const results = await q.find();
+  return results.map((r: any) => r.date as string);
+}
 
-  const { data: frags } = await getSupabase()
-    .from("fragments")
-    .select("*")
-    .eq("record_id", record.id)
-    .order("sort_order", { ascending: true });
+export async function lcGetDayRecord(userId: string, date: string): Promise<DayRecord> {
+  const q = Q("DayRecord");
+  q.equalTo("date", "==", date);
+  q.equalTo("owner", "==", Bmob.Pointer("_User").set(userId));
+  const records = await q.find();
+  if (records.length === 0) return { date, fragments: [] };
 
-  if (!frags) return { date, fragments: [] };
+  const fq = Q("Fragment");
+  fq.equalTo("dayRecord", "==", Bmob.Pointer("DayRecord").set(records[0].objectId));
+  fq.order("createdAt");
+  const frags = await fq.find();
 
   return {
     date,
-    fragments: frags.map((f: Record<string, unknown>) => ({
-      id: f.id as string,
-      type: f.type as Fragment["type"],
+    fragments: frags.map((f: any) => ({
+      id: f.objectId as string,
+      type: f.type as string,
       content: (f.content as string) || "",
       timestamp: f.timestamp as string,
-      imageUrl: f.type === "photo" ? (f.media_url as string) : undefined,
-      audioUrl: f.type === "voice" ? (f.media_url as string) : undefined,
+      imageUrl: f.type === "photo" ? (f.mediaUrl as string) : undefined,
+      audioUrl: f.type === "voice" ? (f.mediaUrl as string) : undefined,
     })),
   };
 }
 
-export async function supaAddFragment(
+export async function lcAddFragment(
   userId: string,
   date: string,
   fragment: Omit<Fragment, "id">,
-  blob?: Blob | null
+  blob?: Blob | null,
 ): Promise<Fragment> {
-  // Ensure day_record exists
-  let { data: record } = await getSupabase()
-    .from("day_records")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("date", date)
-    .single();
+  const recordId = await ensureDayRecord(userId, date);
 
-  if (!record) {
-    const { data: newRecord } = await getSupabase()
-      .from("day_records")
-      .insert({ user_id: userId, date })
-      .select("id")
-      .single();
-    record = newRecord;
-  }
-
-  const fragId = crypto.randomUUID();
   let mediaUrl: string | undefined;
-
-  // Upload media if present
   if (blob && (fragment.type === "photo" || fragment.type === "voice")) {
     const ext = fragment.type === "photo" ? "jpg" : "webm";
-    const path = `${userId}/${date}/${fragId}.${ext}`;
-    await getSupabase().storage.from("diary-media").upload(path, blob, {
-      contentType: fragment.type === "photo" ? "image/jpeg" : "audio/webm",
-      upsert: true,
-    });
-    const { data: urlData } = getSupabase().storage.from("diary-media").getPublicUrl(path);
-    mediaUrl = urlData.publicUrl;
+    const fileObj = new File([blob], `fragment_${Date.now()}.${ext}`, { type: blob.type });
+    const uploaded = await F(`fragment_${Date.now()}.${ext}`, fileObj).save();
+    mediaUrl = (uploaded as any)[0].url;
   }
 
-  const fragRow: Record<string, unknown> = {
-    id: fragId,
-    record_id: record!.id,
-    user_id: userId,
-    type: fragment.type,
-    content: fragment.content,
-    timestamp: fragment.timestamp,
-    media_url: mediaUrl ?? null,
-  };
-
-  await getSupabase().from("fragments").insert(fragRow);
+  const frag = Q("Fragment");
+  frag.set("type", fragment.type);
+  frag.set("content", fragment.content);
+  frag.set("timestamp", fragment.timestamp);
+  frag.set("dayRecord", Bmob.Pointer("DayRecord").set(recordId));
+  frag.set("owner", Bmob.Pointer("_User").set(userId));
+  if (mediaUrl) frag.set("mediaUrl", mediaUrl);
+  const acl = { "*": { read: true }, [userId]: { read: true, write: true } };
+  frag.set("ACL", acl);
+  const saved = await frag.save();
 
   return {
-    id: fragId,
+    id: saved.objectId as string,
     type: fragment.type,
     content: fragment.content,
     timestamp: fragment.timestamp,
@@ -135,72 +131,74 @@ export async function supaAddFragment(
   };
 }
 
-export async function supaUpdateFragment(
-  userId: string,
-  fragmentId: string,
-  updates: Partial<Pick<Fragment, "content">>
-): Promise<void> {
-  const row: Record<string, unknown> = {};
-  if (updates.content !== undefined) row.content = updates.content;
-  await getSupabase().from("fragments").update(row).eq("id", fragmentId).eq("user_id", userId);
+export async function lcUpdateFragment(_userId: string, fragmentId: string, updates: { content?: string }): Promise<void> {
+  const q = Q("Fragment");
+  if (updates.content !== undefined) q.set("content", updates.content);
+  await q.save(fragmentId);
 }
 
-export async function supaDeleteFragment(userId: string, fragmentId: string): Promise<void> {
-  // Get fragment to check for media
-  const { data: frag } = await getSupabase()
-    .from("fragments")
-    .select("media_url")
-    .eq("id", fragmentId)
-    .single();
-
-  if (frag?.media_url) {
-    // Extract path from public URL
-    const url = new URL(frag.media_url as string);
-    const pathParts = url.pathname.split("/storage/v1/object/public/diary-media/");
-    if (pathParts[1]) {
-      await getSupabase().storage.from("diary-media").remove([pathParts[1]]);
-    }
-  }
-
-  await getSupabase().from("fragments").delete().eq("id", fragmentId).eq("user_id", userId);
-
-  // Check if day_record is now empty, clean up
-  // (optional, fragments cascade delete handles the data)
+export async function lcDeleteFragment(_userId: string, fragmentId: string): Promise<void> {
+  const q = Q("Fragment");
+  await q.destroy(fragmentId);
 }
 
-// ─── Supabase: friends ──────────────────────
+// ─── Bmob: friends ──────────────────────────
 
-export async function supaSearchUser(phone: string): Promise<Profile | null> {
-  const { data } = await getSupabase().from("profiles").select("*").eq("phone", phone).single();
-  return data;
+export async function lcSearchUser(phone: string): Promise<any | null> {
+  const q = Q("_User");
+  q.equalTo("username", "==", phone);
+  const results = await q.find();
+  return results.length > 0 ? results[0] : null;
 }
 
-export async function supaSendFriendRequest(requesterId: string, addresseeId: string): Promise<void> {
-  await getSupabase().from("friendships").insert({
-    requester_id: requesterId,
-    addressee_id: addresseeId,
-    status: "pending",
-  });
+export async function lcSendFriendRequest(fromId: string, toId: string): Promise<void> {
+  // Check if already exists
+  const q1 = Q("Friendship");
+  q1.equalTo("fromUser", "==", Bmob.Pointer("_User").set(fromId));
+  q1.equalTo("toUser", "==", Bmob.Pointer("_User").set(toId));
+  const existing = await q1.find();
+  if (existing.length > 0) return;
+
+  const f = Q("Friendship");
+  f.set("fromUser", Bmob.Pointer("_User").set(fromId));
+  f.set("toUser", Bmob.Pointer("_User").set(toId));
+  f.set("status", "pending");
+  await f.save();
 }
 
-export async function supaGetFriendships(userId: string): Promise<Friendship[]> {
-  const { data } = await getSupabase()
-    .from("friendships")
-    .select("*, requester_profile:profiles!requester_id(id,phone,nickname,created_at), addressee_profile:profiles!addressee_id(id,phone,nickname,created_at)")
-    .or(`requester_id.eq.${userId},addressee_id.eq.${userId}`)
-    .order("created_at", { ascending: false });
-  return (data as unknown as Friendship[]) || [];
+export async function lcGetFriendships(userId: string) {
+  const me = Bmob.Pointer("_User").set(userId);
+
+  // Query where fromUser = me
+  const q1 = Q("Friendship");
+  q1.equalTo("fromUser", "==", me);
+
+  // Query where toUser = me
+  const q2 = Q("Friendship");
+  q2.equalTo("toUser", "==", me);
+
+  // Use OR
+  const q = Q("Friendship");
+  q.or([q1, q2]);
+  q.include("fromUser", "toUser");
+  q.order("-createdAt");
+
+  return await q.find();
 }
 
-export async function supaAcceptFriendship(friendshipId: string): Promise<void> {
-  await getSupabase().from("friendships").update({ status: "accepted" }).eq("id", friendshipId);
+export async function lcAcceptFriendship(objectId: string): Promise<void> {
+  const q = Q("Friendship");
+  q.set("status", "accepted");
+  await q.save(objectId);
 }
 
-export async function supaRejectFriendship(friendshipId: string): Promise<void> {
-  await getSupabase().from("friendships").update({ status: "rejected" }).eq("id", friendshipId);
+export async function lcRejectFriendship(objectId: string): Promise<void> {
+  const q = Q("Friendship");
+  q.set("status", "rejected");
+  await q.save(objectId);
 }
 
-// ─── Migration: localStorage → Supabase ─────
+// ─── Migration: localStorage → Bmob ─────────
 
 export async function migrateFromLocalStorage(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
@@ -213,7 +211,6 @@ export async function migrateFromLocalStorage(userId: string): Promise<void> {
   for (const record of records) {
     for (const frag of record.fragments) {
       let blob: Blob | null = null;
-
       if (frag.type === "photo" && frag.imageUrl?.startsWith("data:")) {
         const res = await fetch(frag.imageUrl);
         blob = await res.blob();
@@ -221,8 +218,7 @@ export async function migrateFromLocalStorage(userId: string): Promise<void> {
         const res = await fetch(frag.audioUrl);
         blob = await res.blob();
       }
-
-      await supaAddFragment(userId, record.date, {
+      await lcAddFragment(userId, record.date, {
         type: frag.type,
         content: frag.content,
         timestamp: frag.timestamp,
