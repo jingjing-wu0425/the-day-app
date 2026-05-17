@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Bmob, { initBmob } from "@/lib/bmob";
+import { supabase } from "@/lib/supabase";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -14,20 +14,27 @@ export default function RegisterPage() {
 
   const handleRegister = async () => {
     setError("");
-    initBmob();
     if (!/^\d{11}$/.test(phone)) { setError("请输入11位手机号"); return; }
     if (password.length < 6) { setError("密码至少6位"); return; }
     if (!nickname.trim()) { setError("请输入昵称"); return; }
     setSubmitting(true);
     try {
-      await (Bmob.User.register as any)({ username: phone, password, nickname: nickname.trim() });
-      // Auto-login after register
-      await (Bmob.User.login as any)(phone, password);
+      const { data, error: authError } = await supabase.auth.signUp({
+        email: `${phone}@theday.app`,
+        password,
+      });
+      if (authError) throw authError;
+      if (data.user) {
+        await supabase.from("profiles").insert({
+          id: data.user.id,
+          phone,
+          nickname: nickname.trim(),
+        });
+      }
       router.push("/");
     } catch (err: unknown) {
-      const e = err as { code?: number; error?: string };
-      if (e.code === 202) setError("该手机号已注册");
-      else setError(e.error || "注册失败");
+      const e = err as { message?: string };
+      setError(e.message?.includes("already registered") ? "该手机号已注册" : (e.message || "注册失败"));
     } finally {
       setSubmitting(false);
     }

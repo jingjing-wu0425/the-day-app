@@ -1,17 +1,11 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import Bmob, { initBmob } from "./bmob";
-
-interface BmobUser {
-  objectId: string;
-  username: string;
-  nickname?: string;
-  sessionToken?: string;
-}
+import { supabase } from "./supabase";
+import type { User } from "@supabase/supabase-js";
 
 interface AuthState {
-  user: BmobUser | null;
+  user: User | null;
   loading: boolean;
   signOut: () => void;
 }
@@ -25,25 +19,24 @@ const AuthContext = createContext<AuthState>({
 export const useAuth = () => useContext(AuthContext);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<BmobUser | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    initBmob();
-    const current = Bmob.User.current();
-    if (current) {
-      setUser(current as unknown as BmobUser);
-    }
-    setLoading(false);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const signOut = useCallback(() => {
-    // Bmob.User.logout() clears ALL localStorage, which would break migration flags.
-    // Instead, just clear the Bmob session key.
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("bmob_session_token");
-    }
-    Bmob.User.logout();
+    supabase.auth.signOut();
     setUser(null);
   }, []);
 

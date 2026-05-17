@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Bmob, { initBmob } from "@/lib/bmob";
+import { supabase } from "@/lib/supabase";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,24 +13,19 @@ export default function LoginPage() {
 
   const handleLogin = async () => {
     setError("");
-    initBmob();
     if (!/^\d{11}$/.test(phone)) { setError("请输入11位手机号"); return; }
     if (password.length < 6) { setError("密码至少6位"); return; }
     setSubmitting(true);
     try {
-      const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("请求超时，请检查网络")), 15000)
-      );
-      const result = await Promise.race([
-        (Bmob.User.login as any)(phone, password),
-        timeout,
-      ]);
-      console.log("login ok:", result);
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: `${phone}@theday.app`,
+        password,
+      });
+      if (authError) throw authError;
       router.push("/");
     } catch (err: unknown) {
-      console.error("login error:", err);
-      const e = err as { code?: number; error?: string; message?: string };
-      setError(e.error || e.message || JSON.stringify(err));
+      const e = err as { message?: string };
+      setError(e.message?.includes("Invalid login") ? "手机号或密码错误" : (e.message || "登录失败"));
     } finally {
       setSubmitting(false);
     }

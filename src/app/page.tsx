@@ -106,10 +106,10 @@ export default function Home() {
     if (!user) return;
     (async () => {
       try {
-        await migrateFromLocalStorage(user.objectId);
-        const dates = await lcGetRecordDates(user.objectId);
+        await migrateFromLocalStorage(user.id);
+        const dates = await lcGetRecordDates(user.id);
         setRecordedDates(new Set(dates));
-        const record = await lcGetDayRecord(user.objectId, viewDate);
+        const record = await lcGetDayRecord(user.id, viewDate);
         setFragments(record.fragments);
       } catch (e) {
         console.error("load error:", e);
@@ -170,7 +170,7 @@ export default function Home() {
       const data = await res.json();
       const summary = data?.choices?.[0]?.message?.content?.trim();
       if (!summary || !user) return;
-      const newFrag = await lcAddFragment(user.objectId, dateStr, {
+      const newFrag = await lcAddFragment(user.id, dateStr, {
         type: "summary", content: summary, timestamp: "23:30",
       });
       setFragments((prev) => [...prev, newFrag]);
@@ -222,7 +222,7 @@ export default function Home() {
       const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
       audioChunksRef.current = [];
       setShowVoiceOptions(false);
-      const newFrag = await lcAddFragment(user.objectId, today, {
+      const newFrag = await lcAddFragment(user.id, today, {
         type: "voice", content: "", timestamp: now(), audioUrl: "",
       }, blob);
       setFragments((prev) => [...prev, newFrag]);
@@ -259,7 +259,7 @@ export default function Home() {
       if (editType === "text" || editType === "summary") {
         const t = editText.trim();
         if (!t) return;
-        await lcUpdateFragment(user.objectId, editingId, { content: t });
+        await lcUpdateFragment(user.id, editingId, { content: t });
         setFragments((prev) => prev.map((f) => f.id === editingId ? { ...f, content: t } : f));
       }
     } catch (e) {
@@ -273,7 +273,7 @@ export default function Home() {
   const doDelete = async () => {
     if (!editingId || !user) return;
     try {
-      await lcDeleteFragment(user.objectId, editingId);
+      await lcDeleteFragment(user.id, editingId);
       setFragments((prev) => prev.filter((f) => f.id !== editingId));
     } catch (e) {
       console.error("delete error:", e);
@@ -292,7 +292,7 @@ export default function Home() {
     const t = text.trim();
     if (!t || !user) return;
     try {
-      const newFrag = await lcAddFragment(user.objectId, today, {
+      const newFrag = await lcAddFragment(user.id, today, {
         type: "text", content: t, timestamp: now(),
       });
       setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
@@ -324,7 +324,7 @@ export default function Home() {
         canvas.toBlob(async (blob) => {
           if (!blob) return;
           try {
-            const newFrag = await lcAddFragment(user.objectId, today, {
+            const newFrag = await lcAddFragment(user.id, today, {
               type: "photo", content: "", timestamp: now(), imageUrl: "",
             }, blob);
             setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);

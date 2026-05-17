@@ -14,9 +14,19 @@ import {
 } from "@/lib/store";
 import { Fragment } from "@/lib/types";
 
-interface FriendItem {
-  objectId: string;
-  [key: string]: any;
+interface ProfileRow {
+  id: string;
+  phone: string;
+  nickname: string;
+}
+
+interface FriendshipRow {
+  id: string;
+  status: string;
+  requester_id: string;
+  addressee_id: string;
+  requester: ProfileRow;
+  addressee: ProfileRow;
 }
 
 export default function FriendList({
@@ -27,16 +37,16 @@ export default function FriendList({
   onViewFriend: (userId: string, nickname: string) => void;
 }) {
   const { user } = useAuth();
-  const [friendships, setFriendships] = useState<FriendItem[]>([]);
+  const [friendships, setFriendships] = useState<FriendshipRow[]>([]);
   const [searchPhone, setSearchPhone] = useState("");
-  const [searchResult, setSearchResult] = useState<FriendItem | null>(null);
+  const [searchResult, setSearchResult] = useState<ProfileRow | null>(null);
   const [searchError, setSearchError] = useState("");
   const [sent, setSent] = useState(false);
 
   const load = useCallback(async () => {
     if (!user) return;
-    const data = await lcGetFriendships(user.objectId);
-    setFriendships(data as FriendItem[]);
+    const data = await lcGetFriendships(user.id);
+    setFriendships(data as unknown as FriendshipRow[]);
   }, [user]);
 
   useEffect(() => { load(); }, [load]);
@@ -46,27 +56,25 @@ export default function FriendList({
     if (!/^\d{11}$/.test(searchPhone)) { setSearchError("请输入11位手机号"); return; }
     const result = await lcSearchUser(searchPhone);
     if (!result) { setSearchError("未找到该用户"); }
-    else if (result.objectId === user?.objectId) { setSearchError("不能添加自己"); }
-    else { setSearchResult(result as FriendItem); }
+    else if (result.id === user?.id) { setSearchError("不能添加自己"); }
+    else { setSearchResult(result as ProfileRow); }
   };
 
   const handleAdd = async () => {
     if (!user || !searchResult) return;
-    await lcSendFriendRequest(user.objectId, searchResult.objectId);
+    await lcSendFriendRequest(user.id, searchResult.id);
     setSent(true);
     load();
   };
 
   const accepted = friendships.filter((f) => f.status === "accepted");
-  const pendingIncoming = friendships.filter((f) => f.status === "pending" && f.fromUser?.objectId === user?.objectId);
-  const pendingOutgoing = friendships.filter((f) => f.status === "pending" && f.toUser?.objectId !== user?.objectId);
+  const incoming = friendships.filter((f) => f.status === "pending" && f.addressee_id === user?.id);
+  const outgoing = friendships.filter((f) => f.status === "pending" && f.requester_id === user?.id);
 
-  // Actually: incoming = toUser is me, outgoing = fromUser is me
-  const incoming = friendships.filter((f) => f.status === "pending" && f.toUser?.objectId === user?.objectId);
-  const outgoing = friendships.filter((f) => f.status === "pending" && f.fromUser?.objectId === user?.objectId);
-
-  const getFriendUser = (f: FriendItem): FriendItem | undefined => {
-    return f.fromUser?.objectId === user?.objectId ? f.toUser : f.fromUser;
+  const getFriendProfile = (f: FriendshipRow): ProfileRow => {
+    const r = Array.isArray(f.requester) ? f.requester[0] : f.requester;
+    const a = Array.isArray(f.addressee) ? f.addressee[0] : f.addressee;
+    return f.requester_id === user?.id ? a : r;
   };
 
   return (
@@ -89,8 +97,8 @@ export default function FriendList({
           {searchResult && !sent && (
             <div className="mt-2 flex items-center justify-between bg-fg/[0.03] rounded-lg px-3 py-2">
               <div>
-                <p className="text-[13px] text-fg/70 font-light">{searchResult.nickname || searchResult.username}</p>
-                <p className="text-[11px] text-muted/40 font-light">{searchResult.username}</p>
+                <p className="text-[13px] text-fg/70 font-light">{searchResult.nickname}</p>
+                <p className="text-[11px] text-muted/40 font-light">{searchResult.phone}</p>
               </div>
               <button onClick={handleAdd} className="px-3 py-1 rounded-full bg-fg text-white text-[12px] font-light hover:bg-fg/80 transition-all">添加</button>
             </div>
@@ -101,16 +109,16 @@ export default function FriendList({
           <div className="mb-4">
             <p className="text-[11px] text-muted/40 font-light tracking-widest mb-2">好友请求</p>
             {incoming.map((f) => {
-              const p = getFriendUser(f);
+              const p = getFriendProfile(f);
               return (
-                <div key={f.objectId} className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
+                <div key={f.id} className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
                   <div>
-                    <p className="text-[13px] text-fg/70 font-light">{p?.nickname || p?.username || "用户"}</p>
-                    <p className="text-[11px] text-muted/40 font-light">{p?.username}</p>
+                    <p className="text-[13px] text-fg/70 font-light">{p.nickname}</p>
+                    <p className="text-[11px] text-muted/40 font-light">{p.phone}</p>
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={async () => { await lcAcceptFriendship(f.objectId); load(); }} className="px-3 py-1 rounded-full bg-fg text-white text-[12px] font-light">接受</button>
-                    <button onClick={async () => { await lcRejectFriendship(f.objectId); load(); }} className="px-3 py-1 rounded-full bg-fg/10 text-fg/50 text-[12px] font-light">拒绝</button>
+                    <button onClick={async () => { await lcAcceptFriendship(f.id); load(); }} className="px-3 py-1 rounded-full bg-fg text-white text-[12px] font-light">接受</button>
+                    <button onClick={async () => { await lcRejectFriendship(f.id); load(); }} className="px-3 py-1 rounded-full bg-fg/10 text-fg/50 text-[12px] font-light">拒绝</button>
                   </div>
                 </div>
               );
@@ -121,12 +129,12 @@ export default function FriendList({
           <div className="mb-4">
             <p className="text-[11px] text-muted/40 font-light tracking-widest mb-2">等待确认</p>
             {outgoing.map((f) => {
-              const p = getFriendUser(f);
+              const p = getFriendProfile(f);
               return (
-                <div key={f.objectId} className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
+                <div key={f.id} className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
                   <div>
-                    <p className="text-[13px] text-fg/70 font-light">{p?.nickname || p?.username || "用户"}</p>
-                    <p className="text-[11px] text-muted/40 font-light">{p?.username}</p>
+                    <p className="text-[13px] text-fg/70 font-light">{p.nickname}</p>
+                    <p className="text-[11px] text-muted/40 font-light">{p.phone}</p>
                   </div>
                   <span className="text-[12px] text-muted/30 font-light">等待中</span>
                 </div>
@@ -138,13 +146,13 @@ export default function FriendList({
           <div>
             <p className="text-[11px] text-muted/40 font-light tracking-widest mb-2">我的好友</p>
             {accepted.map((f) => {
-              const p = getFriendUser(f);
+              const p = getFriendProfile(f);
               return (
-                <button key={f.objectId} onClick={() => { if (p) onViewFriend(p.objectId, p.nickname || p.username || "好友"); }}
+                <button key={f.id} onClick={() => onViewFriend(p.id, p.nickname || "好友")}
                   className="w-full flex items-center justify-between py-2.5 border-b border-border/30 last:border-0 hover:bg-fg/[0.02] transition-all rounded-lg px-1">
                   <div className="text-left">
-                    <p className="text-[13px] text-fg/70 font-light">{p?.nickname || p?.username || "用户"}</p>
-                    <p className="text-[11px] text-muted/40 font-light">{p?.username}</p>
+                    <p className="text-[13px] text-fg/70 font-light">{p.nickname}</p>
+                    <p className="text-[11px] text-muted/40 font-light">{p.phone}</p>
                   </div>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-muted/30"><path d="M9 18l6-6-6-6" /></svg>
                 </button>
