@@ -18,26 +18,14 @@ export default function LoginPage() {
     if (password.length < 6) { setError("密码至少6位"); return; }
     setSubmitting(true);
     try {
-      // Test API connectivity first
-      console.log("Testing Bmob API...");
-      const testRes = await fetch("https://api.bmobcloud.com/1/timestamp", {
-        headers: {
-          "X-Bmob-Application-Id": "b1d3eb23bc1054e7",
-          "X-Bmob-REST-API-Key": "a0330c8f3c6430f5f6e1df24a0a2037e",
-        },
-      });
-      const testData = await testRes.json();
-      console.log("Bmob API test:", testData);
-
-      // SDK login with timeout
       const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("请求超时，请检查网络")), 10000)
+        setTimeout(() => reject(new Error("请求超时，请检查网络")), 15000)
       );
       const result = await Promise.race([
         (Bmob.User.login as any)(phone, password),
         timeout,
       ]);
-      console.log("login result:", result);
+      console.log("login ok:", result);
       router.push("/");
     } catch (err: unknown) {
       console.error("login error:", err);
