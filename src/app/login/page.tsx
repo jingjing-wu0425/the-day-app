@@ -18,6 +18,7 @@ export default function LoginPage() {
     if (password.length < 6) { setError("密码至少6位"); return; }
     setSubmitting(true);
     try {
+      console.log("Bmob.User:", Bmob.User, "login:", typeof Bmob.User?.login);
       const result = await (Bmob.User.login as any)(phone, password);
       console.log("login result:", result);
       router.push("/");
