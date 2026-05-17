@@ -105,12 +105,17 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     (async () => {
-      await migrateFromLocalStorage(user.objectId);
-      const dates = await lcGetRecordDates(user.objectId);
-      setRecordedDates(new Set(dates));
-      const record = await lcGetDayRecord(user.objectId, viewDate);
-      setFragments(record.fragments);
-      setLoading(false);
+      try {
+        await migrateFromLocalStorage(user.objectId);
+        const dates = await lcGetRecordDates(user.objectId);
+        setRecordedDates(new Set(dates));
+        const record = await lcGetDayRecord(user.objectId, viewDate);
+        setFragments(record.fragments);
+      } catch (e) {
+        console.error("load error:", e);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [user, viewDate]);
 
@@ -213,14 +218,18 @@ export default function Home() {
 
   const saveAsVoice = async () => {
     if (!user) return;
-    const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-    audioChunksRef.current = [];
-    setShowVoiceOptions(false);
-    const newFrag = await lcAddFragment(user.objectId, today, {
-      type: "voice", content: "", timestamp: now(), audioUrl: "",
-    }, blob);
-    setFragments((prev) => [...prev, newFrag]);
-    setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
+    try {
+      const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      audioChunksRef.current = [];
+      setShowVoiceOptions(false);
+      const newFrag = await lcAddFragment(user.objectId, today, {
+        type: "voice", content: "", timestamp: now(), audioUrl: "",
+      }, blob);
+      setFragments((prev) => [...prev, newFrag]);
+      setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
+    } catch (e) {
+      console.error("save voice error:", e);
+    }
   };
 
   const isToday = viewDate === today;
@@ -246,11 +255,15 @@ export default function Home() {
 
   const saveEdit = async () => {
     if (!editingId || !user) return;
-    if (editType === "text" || editType === "summary") {
-      const t = editText.trim();
-      if (!t) return;
-      await lcUpdateFragment(user.objectId, editingId, { content: t });
-      setFragments((prev) => prev.map((f) => f.id === editingId ? { ...f, content: t } : f));
+    try {
+      if (editType === "text" || editType === "summary") {
+        const t = editText.trim();
+        if (!t) return;
+        await lcUpdateFragment(user.objectId, editingId, { content: t });
+        setFragments((prev) => prev.map((f) => f.id === editingId ? { ...f, content: t } : f));
+      }
+    } catch (e) {
+      console.error("save edit error:", e);
     }
     closeEdit();
   };
@@ -259,8 +272,12 @@ export default function Home() {
 
   const doDelete = async () => {
     if (!editingId || !user) return;
-    await lcDeleteFragment(user.objectId, editingId);
-    setFragments((prev) => prev.filter((f) => f.id !== editingId));
+    try {
+      await lcDeleteFragment(user.objectId, editingId);
+      setFragments((prev) => prev.filter((f) => f.id !== editingId));
+    } catch (e) {
+      console.error("delete error:", e);
+    }
     closeEdit();
   };
 
@@ -274,13 +291,17 @@ export default function Home() {
   const handleSubmit = async () => {
     const t = text.trim();
     if (!t || !user) return;
-    const newFrag = await lcAddFragment(user.objectId, today, {
-      type: "text", content: t, timestamp: now(),
-    });
-    setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
-    setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
-    setText("");
-    if (viewDate !== today) setViewDate(today);
+    try {
+      const newFrag = await lcAddFragment(user.objectId, today, {
+        type: "text", content: t, timestamp: now(),
+      });
+      setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
+      setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
+      setText("");
+      if (viewDate !== today) setViewDate(today);
+    } catch (e) {
+      console.error("submit error:", e);
+    }
   };
 
   const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -302,12 +323,16 @@ export default function Home() {
         canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
         canvas.toBlob(async (blob) => {
           if (!blob) return;
-          const newFrag = await lcAddFragment(user.objectId, today, {
-            type: "photo", content: "", timestamp: now(), imageUrl: "",
-          }, blob);
-          setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
-          setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
-          if (viewDate !== today) setViewDate(today);
+          try {
+            const newFrag = await lcAddFragment(user.objectId, today, {
+              type: "photo", content: "", timestamp: now(), imageUrl: "",
+            }, blob);
+            setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
+            setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
+            if (viewDate !== today) setViewDate(today);
+          } catch (e) {
+            console.error("image upload error:", e);
+          }
         }, "image/jpeg", 0.7);
       };
       img.src = reader.result as string;
