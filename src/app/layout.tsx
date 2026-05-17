@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { AuthProvider } from "@/lib/auth-context";
 
 export const metadata: Metadata = {
   title: "那一天",
@@ -42,9 +43,11 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased">
-        <main className="min-h-dvh bg-bg">
-          {children}
-        </main>
+        <AuthProvider>
+          <main className="min-h-dvh bg-bg">
+            {children}
+          </main>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,18 +1,21 @@
 "use client";
 
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Fragment } from "@/lib/types";
+import { useAuth } from "@/lib/auth-context";
 import {
-  getAllRecords,
-  saveAllRecords,
   getTodayDate,
-  getRecordForDate,
-  addFragmentToRecord,
-  updateFragmentInRecord,
-  deleteFragmentFromRecord,
+  supaGetRecordDates,
+  supaGetDayRecord,
+  supaAddFragment,
+  supaUpdateFragment,
+  supaDeleteFragment,
+  migrateFromLocalStorage,
   formatDateCN,
   getDateLabel,
 } from "@/lib/store";
+import FriendList, { FriendDiary } from "@/components/FriendList";
 
 function now(): string {
   const d = new Date();
@@ -62,12 +65,19 @@ const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const MONTHS = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
 
 export default function Home() {
-  const [records, setRecords] = useState<ReturnType<typeof getAllRecords>>([]);
+  const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
   const today = getTodayDate();
   const [viewDate, setViewDate] = useState(today);
+  const [fragments, setFragments] = useState<Fragment[]>([]);
+  const [recordedDates, setRecordedDates] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+
   const [text, setText] = useState("");
   const [swipeX, setSwipeX] = useState(0);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showFriends, setShowFriends] = useState(false);
+  const [friendView, setFriendView] = useState<{ userId: string; nickname: string } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [editOriginal, setEditOriginal] = useState("");
@@ -78,60 +88,59 @@ export default function Home() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
-  // Calendar month defaults to current viewing date's month
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
 
   const fileRef = useRef<HTMLInputElement>(null);
   const touchStart = useRef({ x: 0, y: 0 });
 
-  // Load from localStorage on mount
+  // Auth guard
   useEffect(() => {
-    setRecords(getAllRecords());
-  }, []);
+    if (!authLoading && !user) {
+      router.replace("/login");
+    }
+  }, [authLoading, user, router]);
+
+  // Migration + initial load
+  useEffect(() => {
+    if (!user) return;
+    (async () => {
+      await migrateFromLocalStorage(user.id);
+      const dates = await supaGetRecordDates(user.id);
+      setRecordedDates(new Set(dates));
+      const record = await supaGetDayRecord(user.id, viewDate);
+      setFragments(record.fragments);
+      setLoading(false);
+    })();
+  }, [user, viewDate]);
 
   // Auto-refresh at midnight
   useEffect(() => {
     const check = () => {
       const newToday = getTodayDate();
-      if (newToday !== today) {
-        window.location.reload();
-      }
+      if (newToday !== today) window.location.reload();
     };
-    // Check every 30 seconds
     const interval = setInterval(check, 30000);
-    // Also set a timeout for exact midnight
     const now2 = new Date();
     const msUntilMidnight =
       new Date(now2.getFullYear(), now2.getMonth(), now2.getDate() + 1).getTime() - now2.getTime();
-    const midnightTimeout = setTimeout(() => {
-      window.location.reload();
-    }, msUntilMidnight + 1000);
-    return () => {
-      clearInterval(interval);
-      clearTimeout(midnightTimeout);
-    };
+    const midnightTimeout = setTimeout(() => window.location.reload(), msUntilMidnight + 1000);
+    return () => { clearInterval(interval); clearTimeout(midnightTimeout); };
   }, [today]);
-
-  // Persist whenever records change
-  useEffect(() => {
-    if (records.length > 0) saveAllRecords(records);
-  }, [records]);
 
   // AI summary generation
   const generateSummary = useCallback(async (dateStr: string) => {
-    const record = getRecordForDate(records, dateStr);
-    if (record.fragments.length === 0) return;
-    const alreadyHas = record.fragments.some((f) => f.type === "summary");
+    if (fragments.length === 0) return;
+    const alreadyHas = fragments.some((f) => f.type === "summary");
     if (alreadyHas) return;
+    if (!user) return;
 
-    const lines = record.fragments
+    const lines = fragments
       .filter((f) => f.type !== "summary")
       .map((f) => {
-        const time = f.timestamp;
-        if (f.type === "text") return `[${time}] ${f.content}`;
-        if (f.type === "voice") return `[${time}] (语音记录)`;
-        if (f.type === "photo") return `[${time}] (照片)`;
+        if (f.type === "text") return `[${f.timestamp}] ${f.content}`;
+        if (f.type === "voice") return `[${f.timestamp}] (语音记录)`;
+        if (f.type === "photo") return `[${f.timestamp}] (照片)`;
         return "";
       })
       .filter(Boolean)
@@ -144,47 +153,35 @@ export default function Home() {
       if (!apiKey) return;
       const res = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model: "glm-4-flash",
           messages: [
-            {
-              role: "system",
-              content: "你是一个温暖、简洁的日记助手。根据用户今天的记录，生成一段简短的今日总结。语气要亲切自然，像朋友在耳边轻声回顾这一天。控制在80字以内，中文。直接输出总结内容，不要加标题或前缀。",
-            },
+            { role: "system", content: "你是一个温暖、简洁的日记助手。根据用户今天的记录，生成一段简短的今日总结。语气要亲切自然，像朋友在耳边轻声回顾这一天。控制在80字以内，中文。直接输出总结内容，不要加标题或前缀。" },
             { role: "user", content: `这是我今天的记录：\n${lines}\n\n请帮我总结一下今天。` },
           ],
         }),
       });
       const data = await res.json();
       const summary = data?.choices?.[0]?.message?.content?.trim();
-      if (!summary) return;
-      const updated = addFragmentToRecord(records, dateStr, {
-        type: "summary",
-        content: summary,
-        timestamp: "23:30",
+      if (!summary || !user) return;
+      const newFrag = await supaAddFragment(user.id, dateStr, {
+        type: "summary", content: summary, timestamp: "23:30",
       });
-      setRecords(updated);
-      saveAllRecords(updated);
+      setFragments((prev) => [...prev, newFrag]);
+      setRecordedDates((prev) => { const next = new Set(prev); next.add(dateStr); return next; });
     } catch {
       // silently fail
     }
-  }, [records]);
+  }, [fragments, user]);
 
   // Auto-summary at 23:30
   useEffect(() => {
     const check = () => {
       const d = new Date();
-      if (d.getHours() === 23 && d.getMinutes() >= 30) {
-        generateSummary(today);
-      }
+      if (d.getHours() === 23 && d.getMinutes() >= 30) generateSummary(today);
     };
-    // Check every 60 seconds
     const interval = setInterval(check, 60000);
-    // Also check immediately (for page loads after 23:30)
     check();
     return () => clearInterval(interval);
   }, [today, generateSummary]);
@@ -214,41 +211,26 @@ export default function Home() {
     setIsRecording(false);
   };
 
-  const saveAsVoice = () => {
+  const saveAsVoice = async () => {
+    if (!user) return;
     const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      const updated = addFragmentToRecord(records, today, {
-        type: "voice",
-        content: "",
-        timestamp: now(),
-        audioUrl: base64,
-      });
-      setRecords(updated);
-      saveAllRecords(updated);
-    };
-    reader.readAsDataURL(blob);
-    setShowVoiceOptions(false);
     audioChunksRef.current = [];
+    setShowVoiceOptions(false);
+    const newFrag = await supaAddFragment(user.id, today, {
+      type: "voice", content: "", timestamp: now(), audioUrl: "",
+    }, blob);
+    setFragments((prev) => [...prev, newFrag]);
+    setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
   };
 
   const isToday = viewDate === today;
-  const currentRecord = getRecordForDate(records, viewDate);
-  const periods = groupByPeriod(currentRecord.fragments);
-  const hasPrev = !!getRecordForDate(records, dateAdd(viewDate, -1)).fragments.length || dateAdd(viewDate, -1) >= "2020-01-01";
+  const periods = groupByPeriod(fragments);
   const label = getDateLabel(viewDate);
 
-  // Dates with records for calendar
-  const recordedDates = useMemo(() => new Set(records.map((r) => r.date)), [records]);
-
-  const goDay = useCallback(
-    (dir: -1 | 1) => {
-      setSwipeX(0);
-      setViewDate((prev) => dateAdd(prev, dir));
-    },
-    []
-  );
+  const goDay = useCallback((dir: -1 | 1) => {
+    setSwipeX(0);
+    setViewDate((prev) => dateAdd(prev, dir));
+  }, []);
 
   const selectDate = (d: string) => {
     setViewDate(d);
@@ -262,27 +244,23 @@ export default function Home() {
     setEditType(fragment.type);
   };
 
-  const saveEdit = () => {
-    if (!editingId) return;
+  const saveEdit = async () => {
+    if (!editingId || !user) return;
     if (editType === "text" || editType === "summary") {
       const t = editText.trim();
       if (!t) return;
-      const updated = updateFragmentInRecord(records, viewDate, editingId, { content: t });
-      setRecords(updated);
-      saveAllRecords(updated);
+      await supaUpdateFragment(user.id, editingId, { content: t });
+      setFragments((prev) => prev.map((f) => f.id === editingId ? { ...f, content: t } : f));
     }
     closeEdit();
   };
 
-  const undoEdit = () => {
-    closeEdit();
-  };
+  const undoEdit = () => closeEdit();
 
-  const doDelete = () => {
-    if (!editingId) return;
-    const updated = deleteFragmentFromRecord(records, viewDate, editingId);
-    setRecords(updated);
-    saveAllRecords(updated);
+  const doDelete = async () => {
+    if (!editingId || !user) return;
+    await supaDeleteFragment(user.id, editingId);
+    setFragments((prev) => prev.filter((f) => f.id !== editingId));
     closeEdit();
   };
 
@@ -293,28 +271,25 @@ export default function Home() {
     setEditType(null);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const t = text.trim();
-    if (!t) return;
-    const updated = addFragmentToRecord(records, today, {
-      type: "text",
-      content: t,
-      timestamp: now(),
+    if (!t || !user) return;
+    const newFrag = await supaAddFragment(user.id, today, {
+      type: "text", content: t, timestamp: now(),
     });
-    setRecords(updated);
-    saveAllRecords(updated);
+    setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
+    setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
     setText("");
-    // If viewing today, stay; else switch back
     if (viewDate !== today) setViewDate(today);
   };
 
   const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !user) return;
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         const MAX = 1200;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
@@ -325,16 +300,15 @@ export default function Home() {
         canvas.width = w;
         canvas.height = h;
         canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
-        const compressed = canvas.toDataURL("image/jpeg", 0.7);
-        const updated = addFragmentToRecord(records, today, {
-          type: "photo",
-          content: "",
-          timestamp: now(),
-          imageUrl: compressed,
-        });
-        setRecords(updated);
-        saveAllRecords(updated);
-        if (viewDate !== today) setViewDate(today);
+        canvas.toBlob(async (blob) => {
+          if (!blob) return;
+          const newFrag = await supaAddFragment(user.id, today, {
+            type: "photo", content: "", timestamp: now(), imageUrl: "",
+          }, blob);
+          setFragments((prev) => viewDate === today ? [...prev, newFrag] : prev);
+          setRecordedDates((prev) => { const next = new Set(prev); next.add(today); return next; });
+          if (viewDate !== today) setViewDate(today);
+        }, "image/jpeg", 0.7);
       };
       img.src = reader.result as string;
     };
@@ -345,19 +319,16 @@ export default function Home() {
   const onTouchStart = (e: React.TouchEvent) => {
     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   };
-
   const onTouchMove = (e: React.TouchEvent) => {
     const dx = e.touches[0].clientX - touchStart.current.x;
     if (Math.abs(dx) > 10) setSwipeX(dx);
   };
-
   const onTouchEnd = () => {
-    if (swipeX > 60) goDay(-1); // right swipe → previous day (yesterday)
-    else if (swipeX < -60 && !isToday) goDay(1); // left swipe → next day (towards today)
+    if (swipeX > 60) goDay(-1);
+    else if (swipeX < -60 && !isToday) goDay(1);
     setSwipeX(0);
   };
 
-  // Calendar grid
   const calendarDays = useMemo(() => {
     const firstDay = new Date(calYear, calMonth, 1).getDay();
     const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
@@ -376,14 +347,34 @@ export default function Home() {
     else setCalMonth(calMonth + 1);
   };
 
-  const isEmpty = currentRecord.fragments.length === 0;
+  const isEmpty = fragments.length === 0;
+
+  // Auth loading
+  if (authLoading || (!user && !authLoading)) {
+    return (
+      <div className="min-h-dvh bg-bg flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-fg/20 border-t-fg/60 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // Friend diary view
+  if (friendView) {
+    return (
+      <FriendDiary
+        userId={friendView.userId}
+        nickname={friendView.nickname}
+        onBack={() => setFriendView(null)}
+      />
+    );
+  }
 
   return (
     <div
       className="max-w-lg mx-auto min-h-dvh bg-bg relative overflow-hidden"
-      onTouchStart={showCalendar ? undefined : onTouchStart}
-      onTouchMove={showCalendar ? undefined : onTouchMove}
-      onTouchEnd={showCalendar ? undefined : onTouchEnd}
+      onTouchStart={showCalendar || showFriends ? undefined : onTouchStart}
+      onTouchMove={showCalendar || showFriends ? undefined : onTouchMove}
+      onTouchEnd={showCalendar || showFriends ? undefined : onTouchEnd}
     >
       <div
         className="transition-transform duration-300 ease-out"
@@ -413,6 +404,18 @@ export default function Home() {
                 <div className="w-8 h-px bg-fg/20 mt-3" />
               </div>
             </div>
+            {/* Friend icon */}
+            <button
+              onClick={() => setShowFriends(true)}
+              className="mt-1 w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/70 hover:bg-fg/5 transition-all"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            </button>
           </div>
 
           {/* Swipe hints */}
@@ -422,158 +425,154 @@ export default function Home() {
             </p>
           )}
 
-          {/* Empty state */}
-          {isEmpty && isToday && (
-            <div className="mt-16 text-center">
-              <p className="text-muted/30 text-[14px] font-light">今天还没有记录</p>
-              <p className="text-muted/20 text-[12px] font-light mt-2">在下方输入框记下这一刻</p>
+          {loading ? (
+            <div className="flex justify-center mt-16">
+              <div className="w-6 h-6 border-2 border-fg/20 border-t-fg/60 rounded-full animate-spin" />
             </div>
-          )}
+          ) : (
+            <>
+              {/* Empty state */}
+              {isEmpty && isToday && (
+                <div className="mt-16 text-center">
+                  <p className="text-muted/30 text-[14px] font-light">今天还没有记录</p>
+                  <p className="text-muted/20 text-[12px] font-light mt-2">在下方输入框记下这一刻</p>
+                </div>
+              )}
+              {isEmpty && !isToday && (
+                <div className="mt-16 text-center">
+                  <p className="text-muted/30 text-[14px] font-light">这天没有记录</p>
+                </div>
+              )}
 
-          {isEmpty && !isToday && (
-            <div className="mt-16 text-center">
-              <p className="text-muted/30 text-[14px] font-light">这天没有记录</p>
-            </div>
-          )}
-
-          {/* Vertical timeline */}
-          {!isEmpty && (
-            <div className="relative">
-              <div className="absolute left-[5px] top-2 bottom-2 w-px bg-border" />
-
-              {periods.map((period) => (
-                <div key={period.label} className="mb-8 last:mb-0">
-                  <div className="relative flex items-center gap-3 mb-4">
-                    <div className="w-[11px] h-[11px] rounded-full bg-fg/10 border-2 border-fg/30 shrink-0 z-10" />
-                    <span className="text-[11px] text-muted font-light tracking-widest">{period.label}</span>
-                    <div className="flex-1 h-px bg-border/50" />
-                  </div>
-
-                  {period.items.map((fragment, i) => (
-                    <div key={fragment.id} className="relative pl-8 pb-6 last:pb-0 animate-fade-up" style={{ animationDelay: `${i * 50}ms` }}>
-                      <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : fragment.type === "voice" ? "bg-fg/70" : fragment.type === "summary" ? "bg-fg/50" : "bg-bg border-2 border-border"}`}>
-                        {(fragment.type === "photo") && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
-                        {fragment.type === "voice" && (
-                          <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="white" strokeWidth="2"/></svg>
-                        )}
-                        {fragment.type === "summary" && (
-                          <svg width="7" height="7" viewBox="0 0 24 24" fill="white"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg>
-                        )}
+              {/* Vertical timeline */}
+              {!isEmpty && (
+                <div className="relative">
+                  <div className="absolute left-[5px] top-2 bottom-2 w-px bg-border" />
+                  {periods.map((period) => (
+                    <div key={period.label} className="mb-8 last:mb-0">
+                      <div className="relative flex items-center gap-3 mb-4">
+                        <div className="w-[11px] h-[11px] rounded-full bg-fg/10 border-2 border-fg/30 shrink-0 z-10" />
+                        <span className="text-[11px] text-muted font-light tracking-widest">{period.label}</span>
+                        <div className="flex-1 h-px bg-border/50" />
                       </div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <p className="text-[11px] text-muted/60 font-light tracking-wide">{fragment.type === "summary" ? "今日总结" : formatTime(fragment.timestamp)}</p>
-                        {editingId !== fragment.id && (
-                          <button
-                            onClick={() => startEdit(fragment)}
-                            className="ml-auto text-muted/20 hover:text-fg/50 transition-colors p-1 -mr-1"
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <circle cx="12" cy="12" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="18" cy="12" r="1" />
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                      {editingId === fragment.id ? (
-                        <div>
-                          {(editType === "text" || editType === "summary") && (
-                            <textarea
-                              value={editText}
-                              onChange={(e) => setEditText(e.target.value)}
-                              onKeyDown={(e) => { if (e.key === "Escape") undoEdit(); }}
-                              autoFocus
-                              rows={3}
-                              className="w-full bg-fg/5 rounded-lg px-3 py-2 text-[14px] text-fg/80 outline-none font-light resize-none leading-relaxed"
-                            />
-                          )}
-                          {editType === "photo" && fragment.imageUrl && (
-                            <div className="w-full aspect-[4/3] rounded-xl overflow-hidden mt-1 opacity-70">
-                              <img src={fragment.imageUrl} alt="编辑中" className="w-full h-full object-cover" />
-                            </div>
-                          )}
-                          {editType === "voice" && (
-                            <div className="bg-fg/5 rounded-lg px-3 py-3 flex items-center gap-2">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg/40 shrink-0">
-                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                                <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="currentColor" strokeWidth="2"/>
-                                <line x1="12" y1="19" x2="12" y2="23"/>
-                                <line x1="8" y1="23" x2="16" y2="23"/>
-                              </svg>
-                              <div className="flex-1 flex items-center gap-[2px]">
-                                {[...Array(20)].map((_, j) => (
-                                  <div key={j} className="w-[2px] rounded-full bg-fg/20" style={{ height: `${Math.random() * 12 + 4}px` }} />
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          <div className="flex items-center gap-4 mt-3 justify-end">
-                            <button onClick={doDelete} className="w-8 h-8 rounded-full flex items-center justify-center text-red-300/80 hover:text-red-400 hover:bg-red-50 transition-all" title="删除">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
-                            </button>
-                            <button onClick={undoEdit} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/70 hover:bg-fg/5 transition-all" title="撤回">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
-                            </button>
-                            {(editType === "text" || editType === "summary") && (
-                              <button onClick={saveEdit} className="w-8 h-8 rounded-full flex items-center justify-center bg-fg text-white hover:bg-fg/80 transition-all" title="保存">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
+                      {period.items.map((fragment, i) => (
+                        <div key={fragment.id} className="relative pl-8 pb-6 last:pb-0 animate-fade-up" style={{ animationDelay: `${i * 50}ms` }}>
+                          <div className={`absolute left-0 top-1.5 w-[11px] h-[11px] rounded-full z-10 flex items-center justify-center ${fragment.type === "photo" ? "bg-fg" : fragment.type === "voice" ? "bg-fg/70" : fragment.type === "summary" ? "bg-fg/50" : "bg-bg border-2 border-border"}`}>
+                            {fragment.type === "photo" && <div className="w-[3px] h-[3px] rounded-full bg-white" />}
+                            {fragment.type === "voice" && (
+                              <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="white" strokeWidth="2" /></svg>
+                            )}
+                            {fragment.type === "summary" && (
+                              <svg width="7" height="7" viewBox="0 0 24 24" fill="white"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z" /></svg>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-[11px] text-muted/60 font-light tracking-wide">{fragment.type === "summary" ? "今日总结" : formatTime(fragment.timestamp)}</p>
+                            {editingId !== fragment.id && (
+                              <button onClick={() => startEdit(fragment)} className="ml-auto text-muted/20 hover:text-fg/50 transition-colors p-1 -mr-1">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <circle cx="12" cy="12" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="18" cy="12" r="1" />
+                                </svg>
                               </button>
                             )}
                           </div>
-                        </div>
-                      ) : (
-                        <>
-                          {fragment.type === "text" && (
-                            <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
-                          )}
-                          {fragment.type === "photo" && (
-                            <div className="w-full aspect-[4/3] rounded-xl card-float overflow-hidden mt-1">
-                              {fragment.imageUrl ? (
-                                <img src={fragment.imageUrl} alt="记录的照片" className="w-full h-full object-cover" />
-                              ) : (
-                                <div className="w-full h-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center text-muted/30">
-                                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                                    <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
-                                  </svg>
+                          {editingId === fragment.id ? (
+                            <div>
+                              {(editType === "text" || editType === "summary") && (
+                                <textarea
+                                  value={editText}
+                                  onChange={(e) => setEditText(e.target.value)}
+                                  onKeyDown={(e) => { if (e.key === "Escape") undoEdit(); }}
+                                  autoFocus rows={3}
+                                  className="w-full bg-fg/5 rounded-lg px-3 py-2 text-[14px] text-fg/80 outline-none font-light resize-none leading-relaxed"
+                                />
+                              )}
+                              {editType === "photo" && fragment.imageUrl && (
+                                <div className="w-full aspect-[4/3] rounded-xl overflow-hidden mt-1 opacity-70">
+                                  <img src={fragment.imageUrl} alt="编辑中" className="w-full h-full object-cover" />
                                 </div>
                               )}
-                            </div>
-                          )}
-                          {fragment.type === "voice" && (
-                            <div className="bg-fg/[0.03] rounded-xl px-3 py-3 card-float mt-1">
-                              <div className="flex items-center gap-3">
-                                <button
-                                  onClick={() => {
-                                    const audio = new Audio(fragment.audioUrl);
-                                    audio.play();
-                                  }}
-                                  className="w-8 h-8 rounded-full bg-fg/10 flex items-center justify-center text-fg/60 hover:bg-fg/20 transition-all shrink-0"
-                                >
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                </button>
-                                <div className="flex-1 flex items-center gap-[2px]">
-                                  {[...Array(24)].map((_, j) => (
-                                    <div key={j} className="w-[2px] rounded-full bg-fg/15" style={{ height: `${Math.random() * 12 + 4}px` }} />
-                                  ))}
+                              {editType === "voice" && (
+                                <div className="bg-fg/5 rounded-lg px-3 py-3 flex items-center gap-2">
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg/40 shrink-0">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke="currentColor" strokeWidth="2" />
+                                    <line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
+                                  </svg>
+                                  <div className="flex-1 flex items-center gap-[2px]">
+                                    {[...Array(20)].map((_, j) => (
+                                      <div key={j} className="w-[2px] rounded-full bg-fg/20" style={{ height: `${Math.random() * 12 + 4}px` }} />
+                                    ))}
+                                  </div>
                                 </div>
+                              )}
+                              <div className="flex items-center gap-4 mt-3 justify-end">
+                                <button onClick={doDelete} className="w-8 h-8 rounded-full flex items-center justify-center text-red-300/80 hover:text-red-400 hover:bg-red-50 transition-all" title="删除">
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                                </button>
+                                <button onClick={undoEdit} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/40 hover:text-fg/70 hover:bg-fg/5 transition-all" title="撤回">
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                                </button>
+                                {(editType === "text" || editType === "summary") && (
+                                  <button onClick={saveEdit} className="w-8 h-8 rounded-full flex items-center justify-center bg-fg text-white hover:bg-fg/80 transition-all" title="保存">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
+                                  </button>
+                                )}
                               </div>
                             </div>
+                          ) : (
+                            <>
+                              {fragment.type === "text" && (
+                                <p className="text-[14px] text-fg/75 font-light leading-relaxed">{fragment.content}</p>
+                              )}
+                              {fragment.type === "photo" && (
+                                <div className="w-full aspect-[4/3] rounded-xl card-float overflow-hidden mt-1">
+                                  {fragment.imageUrl ? (
+                                    <img src={fragment.imageUrl} alt="记录的照片" className="w-full h-full object-cover" />
+                                  ) : (
+                                    <div className="w-full h-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center text-muted/30">
+                                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                                      </svg>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              {fragment.type === "voice" && (
+                                <div className="bg-fg/[0.03] rounded-xl px-3 py-3 card-float mt-1">
+                                  <div className="flex items-center gap-3">
+                                    <button
+                                      onClick={() => { const audio = new Audio(fragment.audioUrl); audio.play(); }}
+                                      className="w-8 h-8 rounded-full bg-fg/10 flex items-center justify-center text-fg/60 hover:bg-fg/20 transition-all shrink-0"
+                                    >
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                                    </button>
+                                    <div className="flex-1 flex items-center gap-[2px]">
+                                      {[...Array(24)].map((_, j) => (
+                                        <div key={j} className="w-[2px] rounded-full bg-fg/15" style={{ height: `${Math.random() * 12 + 4}px` }} />
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              {fragment.type === "summary" && (
+                                <div className="bg-gradient-to-br from-fg/[0.04] to-fg/[0.02] rounded-xl px-4 py-3 card-float mt-1">
+                                  <p className="text-[13px] text-fg/65 font-light leading-relaxed">{fragment.content}</p>
+                                </div>
+                              )}
+                            </>
                           )}
-                          {fragment.type === "summary" && (
-                            <div className="bg-gradient-to-br from-fg/[0.04] to-fg/[0.02] rounded-xl px-4 py-3 card-float mt-1">
-                              <p className="text-[13px] text-fg/65 font-light leading-relaxed">{fragment.content}</p>
-                            </div>
-                          )}
-                        </>
-                      )}
+                        </div>
+                      ))}
                     </div>
                   ))}
+                  <div className="relative flex items-center gap-3">
+                    <div className="w-[11px] h-[11px] rounded-full bg-fg/20 shrink-0 z-10" />
+                    <span className="text-[11px] text-muted/40 font-light">一天结束</span>
+                  </div>
                 </div>
-              ))}
-
-              <div className="relative flex items-center gap-3">
-                <div className="w-[11px] h-[11px] rounded-full bg-fg/20 shrink-0 z-10" />
-                <span className="text-[11px] text-muted/40 font-light">一天结束</span>
-              </div>
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -587,20 +586,16 @@ export default function Home() {
               <button onClick={prevMonth} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/50 hover:text-fg transition-colors">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
               </button>
-              <span className="text-[14px] text-fg/80 font-light tracking-wide">
-                {calYear} {MONTHS[calMonth]}
-              </span>
+              <span className="text-[14px] text-fg/80 font-light tracking-wide">{calYear} {MONTHS[calMonth]}</span>
               <button onClick={nextMonth} className="w-8 h-8 rounded-full flex items-center justify-center text-muted/50 hover:text-fg transition-colors">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6" /></svg>
               </button>
             </div>
-
             <div className="grid grid-cols-7 mb-2">
               {WEEKDAYS.map((d) => (
                 <div key={d} className="text-[11px] text-muted/40 font-light text-center py-1">{d}</div>
               ))}
             </div>
-
             <div className="grid grid-cols-7">
               {calendarDays.map((day, i) => {
                 if (day === null) return <div key={`e${i}`} />;
@@ -609,7 +604,6 @@ export default function Home() {
                 const isSelected = dateStr === viewDate;
                 const isCurrent = dateStr === today;
                 const isFuture = dateStr > today;
-
                 return (
                   <button
                     key={dateStr}
@@ -622,22 +616,24 @@ export default function Home() {
                     `}
                   >
                     {day}
-                    {hasRecord && !isSelected && (
-                      <div className="absolute bottom-1 w-1 h-1 rounded-full bg-fg/30" />
-                    )}
+                    {hasRecord && !isSelected && <div className="absolute bottom-1 w-1 h-1 rounded-full bg-fg/30" />}
                   </button>
                 );
               })}
             </div>
-
-            <button
-              onClick={() => setShowCalendar(false)}
-              className="mt-5 w-full text-[12px] text-muted/40 font-light tracking-wide text-center hover:text-fg/60 transition-colors"
-            >
+            <button onClick={() => setShowCalendar(false)} className="mt-5 w-full text-[12px] text-muted/40 font-light tracking-wide text-center hover:text-fg/60 transition-colors">
               关闭
             </button>
           </div>
         </div>
+      )}
+
+      {/* Friend list overlay */}
+      {showFriends && (
+        <FriendList
+          onClose={() => setShowFriends(false)}
+          onViewFriend={(userId, nickname) => { setShowFriends(false); setFriendView({ userId, nickname }); }}
+        />
       )}
 
       {/* Bottom bar — input only on today */}
@@ -653,15 +649,12 @@ export default function Home() {
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImage} />
               <button
                 onClick={() => { isRecording ? stopRecording() : startRecording(); }}
-                className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
-                  isRecording ? "bg-red-500 text-white animate-pulse" : "text-muted/60 hover:text-fg/80"
-                }`}
+                className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${isRecording ? "bg-red-500 text-white animate-pulse" : "text-muted/60 hover:text-fg/80"}`}
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" fill={isRecording ? "currentColor" : "none"} />
                   <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                  <line x1="12" y1="19" x2="12" y2="23" />
-                  <line x1="8" y1="23" x2="16" y2="23" />
+                  <line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
                 </svg>
               </button>
               <input
@@ -674,21 +667,14 @@ export default function Home() {
               />
               <button
                 onClick={handleSubmit}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 ${
-                  text.trim() ? "bg-fg text-white scale-100" : "bg-transparent text-muted/30 scale-90"
-                }`}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 ${text.trim() ? "bg-fg text-white scale-100" : "bg-transparent text-muted/30 scale-90"}`}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </button>
             </div>
-
-            {/* Voice options popover */}
             {showVoiceOptions && (
               <div className="mt-3 flex items-center gap-3 justify-center animate-fade-up">
-                <button
-                  onClick={saveAsVoice}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-fg/[0.06] text-[13px] text-fg/70 font-light hover:bg-fg/10 transition-all"
-                >
+                <button onClick={saveAsVoice} className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-fg/[0.06] text-[13px] text-fg/70 font-light hover:bg-fg/10 transition-all">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
                     <path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
